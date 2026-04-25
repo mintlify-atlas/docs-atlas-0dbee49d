@@ -1,0 +1,89 @@
+---
+title: "FreeLLMAPI: one endpoint, 14 free AI providers"
+description: "FreeLLMAPI is an OpenAI-compatible proxy that aggregates free-tier keys from 14 AI providers with automatic failover, giving you ~1.3B tokens/month at no cost."
+---
+
+FreeLLMAPI collapses fourteen different AI provider free tiers — Google, Groq, Cerebras, SambaNova, NVIDIA, Mistral, OpenRouter, GitHub Models, Hugging Face, Cohere, Cloudflare, Zhipu, Moonshot, and MiniMax — into a single OpenAI-compatible endpoint. Point any OpenAI client at your local server and it routes transparently across whichever providers you've added keys for, automatically falling over to the next provider when one is rate-limited.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Clone, configure, and make your first request in under five minutes.
+  </Card>
+  <Card title="How the router works" icon="route" href="/concepts/router">
+    Learn how FreeLLMAPI picks the best available model for every request.
+  </Card>
+  <Card title="Supported providers" icon="server" href="/providers/overview">
+    See all 14 supported providers and their free-tier token budgets.
+  </Card>
+  <Card title="API reference" icon="code" href="/api/chat-completions">
+    Full reference for the OpenAI-compatible chat completions endpoint.
+  </Card>
+</CardGroup>
+
+## Why FreeLLMAPI?
+
+Every major AI lab now offers a free tier — a few million tokens per month, a few thousand requests per day. Individually each tier is a toy. Stacked together across 14 providers, they add up to roughly **1.3 billion tokens per month** of working inference capacity.
+
+The problem is that stacking them manually is painful: 14 different SDKs, 14 different rate limits, 14 places a request can fail. FreeLLMAPI handles all of that for you.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="OpenAI-compatible" icon="plug">
+    Works with the official OpenAI SDK, LangChain, LlamaIndex, Continue, and any other OpenAI-compatible client. Just change `base_url`.
+  </Card>
+  <Card title="Automatic failover" icon="shield-check">
+    On a 429 or 5xx, the router cools down the key and retries the next model — up to 20 attempts per request.
+  </Card>
+  <Card title="Streaming + tool calling" icon="bolt">
+    Full SSE streaming and OpenAI-style function/tool calling across every provider in the fallback chain.
+  </Card>
+  <Card title="Encrypted key storage" icon="lock">
+    Provider API keys are encrypted with AES-256-GCM before hitting SQLite. They never leave the server in plaintext.
+  </Card>
+  <Card title="Per-key rate tracking" icon="gauge">
+    RPM, RPD, TPM, and TPD counters per key ensure the router never sends a request it knows will be rejected.
+  </Card>
+  <Card title="Admin dashboard" icon="chart-bar">
+    React + Vite UI for managing keys, reordering the fallback chain, and inspecting analytics.
+  </Card>
+</CardGroup>
+
+## Get started in 3 steps
+
+<Steps>
+  <Step title="Clone and install">
+    ```bash
+    git clone https://github.com/tashfeenahmed/freellmapi.git
+    cd freellmapi
+    npm install
+    ```
+  </Step>
+  <Step title="Configure and start">
+    ```bash
+    cp .env.example .env
+    echo "ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")" >> .env
+    npm run dev
+    ```
+    Open [http://localhost:5173](http://localhost:5173), add your provider keys, and grab your unified API key.
+  </Step>
+  <Step title="Make your first request">
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url="http://localhost:3001/v1",
+        api_key="freellmapi-your-unified-key",
+    )
+    resp = client.chat.completions.create(
+        model="auto",
+        messages=[{"role": "user", "content": "Hello!"}],
+    )
+    print(resp.choices[0].message.content)
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+FreeLLMAPI is designed for **personal experimentation only**. It is not a production-grade inference service. Free tiers can change without notice, and there is no SLA. Do not expose your FreeLLMAPI endpoint to the internet or share it with other users.
+</Warning>

@@ -1,81 +1,153 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Quickstart: run FreeLLMAPI and make your first API call"
+description: "Install FreeLLMAPI, add your first provider key, and make a working chat completions request through the unified endpoint — all in under five minutes."
 ---
 
-## Get started in three steps
+FreeLLMAPI gives you a single OpenAI-compatible endpoint that routes across up to 14 free AI provider tiers. This guide walks you from a fresh clone to your first successful API call, covering everything you need to get the server running, the dashboard open, and a response in your terminal.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  FreeLLMAPI requires **Node.js 20 or later** and npm. Check your version with `node --version` before continuing.
+</Note>
 
-### Step 1: Set up your local environment
+<Steps>
+  <Step title="Clone the repository">
+    Clone FreeLLMAPI and move into the project directory:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    git clone https://github.com/tashfeenahmed/freellmapi.git
+    cd freellmapi
+    ```
+  </Step>
 
-### Step 2: Deploy your changes
+  <Step title="Install dependencies">
+    Install all workspace packages from the repo root:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    npm install
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    This installs both the Express server (`server/`) and the React dashboard (`client/`) in one step.
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Generate your encryption key">
+    FreeLLMAPI encrypts every provider API key with AES-256-GCM before writing it to SQLite. You need a 64-character hex key to enable this. Copy the example env file and append a freshly generated key:
 
-### Step 3: Go live
+    ```bash
+    cp .env.example .env
+    echo "ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")" >> .env
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    This one-liner calls Node's built-in `crypto` module — no extra packages required. The key is written directly into `.env` and never leaves your machine.
+  </Step>
+
+  <Step title="Start the server">
+    Run the development server. This starts both the Express proxy on port 3001 and the Vite dashboard on port 5173, both with hot-module reload:
+
+    ```bash
+    npm run dev
+    ```
+
+    You should see output confirming the server is listening and the database has been initialized.
+  </Step>
+
+  <Step title="Open the dashboard">
+    Navigate to [http://localhost:5173](http://localhost:5173) in your browser. The React admin dashboard loads with four sections: **Keys**, **Fallback Chain**, **Analytics**, and **Playground**.
+  </Step>
+
+  <Step title="Add your first provider key">
+    Go to the **Keys** page in the dashboard. Select a provider from the dropdown (for example, Google), paste your API key, and click **Add Key**. FreeLLMAPI encrypts it immediately and runs a health probe to confirm it is valid.
+
+    You can add keys for as many of the 14 supported providers as you have accounts with — the router uses whichever are healthy and under their rate limits.
+  </Step>
+
+  <Step title="Copy your unified API key">
+    At the top of the **Keys** page you will see a `freellmapi-…` bearer token. This is your unified API key — the single credential your applications use to talk to the proxy. Copy it now.
+
+    The unified key is stored in SQLite and survives server restarts. You do not need to regenerate it each time you start FreeLLMAPI.
+  </Step>
+
+  <Step title="Make your first request">
+    Replace `freellmapi-your-unified-key` with the key you copied above. Using `model: "auto"` tells the router to pick the best available model from your fallback chain:
+
+    <CodeGroup>
+      ```python Python
+      from openai import OpenAI
+
+      client = OpenAI(
+          base_url="http://localhost:3001/v1",
+          api_key="freellmapi-your-unified-key",
+      )
+
+      resp = client.chat.completions.create(
+          model="auto",
+          messages=[{"role": "user", "content": "Summarise the fall of Rome in one sentence."}],
+      )
+
+      print(resp.choices[0].message.content)
+
+      # See which provider served the request
+      print("Routed via:", resp.headers.get("x-routed-via"))
+      ```
+
+      ```bash curl
+      curl http://localhost:3001/v1/chat/completions \
+        -H "Authorization: Bearer freellmapi-your-unified-key" \
+        -H "Content-Type: application/json" \
+        -d '{
+          "model": "auto",
+          "messages": [{"role": "user", "content": "Summarise the fall of Rome in one sentence."}]
+        }'
+      ```
+    </CodeGroup>
+
+    Every response includes an `X-Routed-Via: <platform>/<model>` header so you can see exactly which provider handled the call. If the router fell back from a rate-limited provider, you will also see `X-Fallback-Attempts: N` in the response headers.
+  </Step>
+</Steps>
+
+## Streaming responses
+
+FreeLLMAPI supports Server-Sent Events on every provider in the fallback chain. Pass `stream=True` (Python) or `"stream": true` (JSON) and iterate over the chunks exactly as you would with the OpenAI SDK:
+
+<Tip>
+  Streaming works identically across all supported providers. The router translates SSE format differences transparently — your client code stays the same regardless of which provider serves the request.
+</Tip>
+
+<CodeGroup>
+  ```python Python
+  stream = client.chat.completions.create(
+      model="auto",
+      messages=[{"role": "user", "content": "Stream me a haiku about SQLite."}],
+      stream=True,
+  )
+  for chunk in stream:
+      print(chunk.choices[0].delta.content or "", end="", flush=True)
+  ```
+
+  ```bash curl
+  curl http://localhost:3001/v1/chat/completions \
+    -H "Authorization: Bearer freellmapi-your-unified-key" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "auto",
+      "messages": [{"role": "user", "content": "Stream me a haiku about SQLite."}],
+      "stream": true
+    }'
+  ```
+</CodeGroup>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Configuration" icon="sliders" href="/configuration">
+    Learn about the `.env` variables and production build options.
+  </Card>
+  <Card title="Adding providers" icon="key" href="/guides/adding-providers">
+    Add keys for more providers to increase your total free-tier token budget.
+  </Card>
+  <Card title="Fallback chain" icon="route" href="/concepts/fallback-chain">
+    Understand how FreeLLMAPI orders providers and handles failover.
+  </Card>
+  <Card title="Tool calling" icon="wrench" href="/guides/tool-calling">
+    Use OpenAI-style function calling across any provider in the chain.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

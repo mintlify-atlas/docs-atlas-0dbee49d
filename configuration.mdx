@@ -1,0 +1,103 @@
+---
+title: "Configuring FreeLLMAPI: environment and startup options"
+description: "Set up your .env file, generate a secure encryption key, and choose between the development server and the production build for running FreeLLMAPI."
+---
+
+FreeLLMAPI is configured through a `.env` file in the project root. Before the server will start, you need to provide at minimum an `ENCRYPTION_KEY` — a 64-character hex string that protects every provider API key you add. This page covers all available environment variables and explains the difference between the development and production startup modes.
+
+## Environment variables
+
+Copy `.env.example` to `.env` before your first run:
+
+```bash
+cp .env.example .env
+```
+
+The example file contains:
+
+```bash .env.example
+# Server encryption key for API key storage (generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+ENCRYPTION_KEY=your-64-char-hex-key-here
+
+# Server port (default: 3001)
+PORT=3001
+```
+
+### `ENCRYPTION_KEY` (required)
+
+FreeLLMAPI encrypts every provider API key with AES-256-GCM before writing it to SQLite. The `ENCRYPTION_KEY` is the 32-byte (64-character hex) master key used for all encryption and decryption operations.
+
+Generate a secure key with Node's built-in `crypto` module — no additional packages required:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+To generate and append the key to your `.env` in one command:
+
+```bash
+echo "ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")" >> .env
+```
+
+<Warning>
+  Keep `ENCRYPTION_KEY` secret and back it up somewhere safe. If you lose this key, all provider API keys stored in the database become permanently unreadable — FreeLLMAPI cannot decrypt them without it. You would need to delete the database and re-enter every provider key from scratch.
+
+  Never commit `.env` to version control. The repository's `.gitignore` already excludes it.
+</Warning>
+
+### `PORT` (optional)
+
+The port the Express server listens on. Defaults to `3001` if not set.
+
+```bash
+PORT=3001
+```
+
+Both the proxy endpoint (`/v1/chat/completions`) and the dashboard static files are served on this port in production. In development, the dashboard runs separately on port 5173 via Vite.
+
+## Startup modes
+
+### Development mode
+
+```bash
+npm run dev
+```
+
+This command starts two processes concurrently:
+
+- **Express server** on `:3001` — the OpenAI-compatible proxy and API
+- **Vite dev server** on `:5173` — the React dashboard with hot-module reload (HMR)
+
+Use the Vite URL (`http://localhost:5173`) for the dashboard during development. Both processes reload automatically when you change source files. This is the recommended mode for local use.
+
+### Production mode
+
+Build the server TypeScript and the React dashboard, then serve everything from a single port:
+
+```bash
+npm run build
+node server/dist/index.js
+```
+
+In production, the compiled Express server serves the pre-built dashboard static files from `client/dist/` alongside the API. Both the dashboard and the proxy are available on `:3001` (or whichever `PORT` you set) — there is no separate Vite process.
+
+## The unified API key
+
+When the database initializes for the first time, FreeLLMAPI automatically generates a `freellmapi-…` bearer token and stores it in the `settings` table in SQLite.
+
+<Note>
+  The unified API key persists across server restarts. It is stored in the SQLite database (`server/data/freeapi.db`) and does not change unless you explicitly regenerate it from the **Keys** page in the dashboard. You only need to copy it once.
+</Note>
+
+This is the single credential your applications use — you never expose upstream provider keys to client code. You can regenerate it at any time from the **Keys** page in the dashboard if you need to rotate it.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Adding providers" icon="key" href="/guides/adding-providers">
+    Add API keys for each provider you want in your fallback chain.
+  </Card>
+  <Card title="Deployment" icon="server" href="/guides/deployment">
+    Run FreeLLMAPI on a Raspberry Pi or a VPS under PM2 and nginx.
+  </Card>
+</CardGroup>

@@ -1,0 +1,87 @@
+---
+title: "Admin API: unified API key management"
+description: "Retrieve or regenerate the unified FreeLLMAPI bearer token. This is the single credential your applications use — separate from any upstream provider API keys."
+---
+
+FreeLLMAPI issues a single bearer token — the unified API key — that all client applications present when calling the `/v1/chat/completions` endpoint. This key is distinct from provider keys: it is what your own applications use to authenticate with FreeLLMAPI, not what FreeLLMAPI uses to authenticate with upstream providers. These endpoints let you retrieve the current key and generate a replacement.
+
+## Endpoints
+
+### Get the current unified key
+
+Returns the active unified API key.
+
+```http
+GET /api/settings/api-key
+```
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/api/settings/api-key
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="apiKey" type="string">
+  The current unified bearer token. Always prefixed with `freellmapi-`.
+</ResponseField>
+
+```json
+{
+  "apiKey": "freellmapi-a1b2c3d4e5f6..."
+}
+```
+
+---
+
+### Regenerate the unified key
+
+Generates a new unified API key and immediately replaces the previous one. The old key is invalidated as soon as the new one is issued.
+
+```http
+POST /api/settings/api-key/regenerate
+```
+
+<CodeGroup>
+
+```bash curl
+curl -X POST http://localhost:3001/api/settings/api-key/regenerate
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="apiKey" type="string">
+  The newly generated bearer token. Always prefixed with `freellmapi-`.
+</ResponseField>
+
+```json
+{
+  "apiKey": "freellmapi-z9y8x7w6v5u4..."
+}
+```
+
+<Warning>
+  Regenerating the key immediately invalidates the previous one. Any application or script that sends the old key will receive `401 Unauthorized` responses until it is updated with the new value.
+</Warning>
+
+---
+
+## Using the unified key
+
+Pass the unified API key as a bearer token in the `Authorization` header when calling FreeLLMAPI's OpenAI-compatible endpoint:
+
+```bash curl
+curl -X POST http://localhost:3001/v1/chat/completions \
+  -H "Authorization: Bearer freellmapi-a1b2c3d4e5f6..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+The unified key is shared across all clients. If you need to revoke access for a specific client without affecting others, regenerate the key and distribute the new value selectively.

@@ -1,0 +1,143 @@
+---
+title: "Deploy FreeLLMAPI to production"
+description: "Build and run FreeLLMAPI on a server or Raspberry Pi, keep it running with PM2, and put it behind nginx — safely, without exposing it to the internet."
+---
+
+FreeLLMAPI is designed to be a lightweight personal inference proxy that you run for yourself. The Node.js process is small enough to run happily on a Raspberry Pi 4 alongside other services — around 40 MB RSS at idle — and the production build serves both the API and the dashboard from a single port. This guide covers a production build, process management with PM2, and an nginx reverse proxy.
+
+<Warning>
+  FreeLLMAPI has no multi-tenant authentication. It is a **single-user,
+  local-first** tool. Do not expose port 3001 (or your nginx upstream) to the
+  public internet. Treat the unified API key like a secret: anyone with it can
+  make requests on your provider keys.
+</Warning>
+
+<Warning>
+  The `ENCRYPTION_KEY` in your `.env` file is used to encrypt all stored
+  provider API keys with AES-256-GCM. If this key is lost, the stored keys
+  cannot be decrypted. Keep it in a password manager or a secrets vault — never
+  commit it to source control. Back up both the `.env` file and the SQLite
+  database (`server/data/freeapi.db`) together; neither is useful without the
+  other.
+</Warning>
+
+## Production build
+
+Install dependencies and compile the TypeScript server and Vite client bundles:
+
+```bash
+npm install
+npm run build
+```
+
+The build outputs to `server/dist/` (Express API) and `client/dist/` (React dashboard). After the build, start the server with Node directly:
+
+```bash
+node server/dist/index.js
+```
+
+Both the API (`/v1/*`) and the dashboard UI are served on port 3001. Open `http://your-server:3001` in a browser for the dashboard, and point your OpenAI clients at `http://your-server:3001/v1`.
+
+Set the required environment variable before starting:
+
+```bash
+export ENCRYPTION_KEY=<your-hex-key>
+node server/dist/index.js
+```
+
+Or keep a `.env` file in the repository root — the server loads it on startup via `dotenv`.
+
+## PM2 process management
+
+PM2 keeps the server running across reboots and restarts it if it crashes. Install PM2 globally and use an ecosystem config file:
+
+```bash
+npm install -g pm2
+```
+
+Create `ecosystem.config.cjs` in the repository root:
+
+```javascript ecosystem.config.cjs
+module.exports = {
+  apps: [
+    {
+      name: "freellmapi",
+      script: "server/dist/index.js",
+      cwd: "/home/pi/freellmapi",   // adjust to your clone path
+      interpreter: "node",
+      env: {
+        NODE_ENV: "production",
+        ENCRYPTION_KEY: "your-64-char-hex-key-here",
+        PORT: "3001",
+      },
+      restart_delay: 5000,
+      max_restarts: 10,
+      watch: false,
+    },
+  ],
+};
+```
+
+Start the app and save the PM2 process list so it survives reboots:
+
+```bash
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup   # follow the printed command to enable on-boot launch
+```
+
+Useful PM2 commands:
+
+```bash
+pm2 status          # check running processes
+pm2 logs freellmapi # tail the log stream
+pm2 restart freellmapi
+pm2 stop freellmapi
+```
+
+## nginx reverse proxy
+
+Put nginx in front of the Node process so you get access logs, TLS termination (if desired), and control over who can reach the endpoint. The configuration below binds on localhost only — traffic reaches FreeLLMAPI exclusively through nginx, and nginx is configured to only accept connections from `127.0.0.1` or your LAN subnet.
+
+```nginx /etc/nginx/sites-available/freellmapi
+server {
+    listen 80;
+    server_name freellmapi.local;   # or the LAN IP of your server
+
+    # Optional: restrict to LAN subnet only
+    # allow 192.168.1.0/24;
+    # deny all;
+
+    location / {
+        proxy_pass         http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+
+        # Required for SSE streaming (stream: true)
+        proxy_set_header   Connection '';
+        proxy_buffering    off;
+        proxy_cache        off;
+        chunked_transfer_encoding on;
+
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+        # Increase timeout for slow providers
+        proxy_read_timeout 120s;
+    }
+}
+```
+
+Enable the site and reload nginx:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/freellmapi /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+## Raspberry Pi notes
+
+FreeLLMAPI runs well on a Raspberry Pi 4 (2 GB RAM or more is comfortable). Use a 64-bit Raspberry Pi OS and install Node.js 20+ via `nvm` or the NodeSource package repository. The server idles at roughly 40 MB RSS, leaving plenty of headroom for other services. Use PM2 as described above to manage the process; the `pm2 startup` command generates a systemd service that launches PM2 on boot.
+
+If you are running the Pi headless, access the dashboard from your laptop's browser by pointing it at the Pi's LAN IP address (or hostname) via the nginx reverse proxy.

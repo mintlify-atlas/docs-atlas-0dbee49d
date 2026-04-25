@@ -1,0 +1,127 @@
+---
+title: "Understanding the fallback chain"
+description: "The fallback chain is the ordered list of models FreeLLMAPI tries for each request, with dynamic penalties that temporarily demote models returning 429s."
+---
+
+The fallback chain is the decision tree FreeLLMAPI walks every time a request arrives. It is an ordered list of `(model, platform)` pairs stored in the `fallback_config` table. The router starts at entry 1 and works down the list until it finds a model with a healthy key that is under all its rate limits. If a model is rate-limited or its keys are on cooldown, the router skips it automatically and continues to the next entry without returning an error to your client.
+
+## Priority and ordering
+
+Each entry in `fallback_config` has an integer `priority` column. Lower numbers are tried first — priority 1 is the first model the router reaches for, priority 2 is the second, and so on. The priorities do not need to be contiguous; gaps are fine.
+
+```sql
+CREATE TABLE fallback_config (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  model_db_id  INTEGER NOT NULL REFERENCES models(id),
+  priority     INTEGER NOT NULL,
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(model_db_id)
+);
+```
+
+A disabled entry (`enabled = 0`) is skipped by the router entirely, regardless of its priority.
+
+## Sort presets
+
+The admin dashboard and the Admin API expose three one-click sort presets, implemented in `server/src/routes/fallback.ts`:
+
+| Preset | Sort key | Best for |
+|---|---|---|
+| `intelligence` | `intelligence_rank ASC` | Highest-quality answers; uses frontier models first |
+| `speed` | `speed_rank ASC` | Lowest latency; uses Groq and Cerebras first |
+| `budget` | Monthly token budget descending | Maximising total tokens before daily limits hit |
+
+Apply a preset via the dashboard's **Fallback Chain** page, or with the API:
+
+```bash
+curl -X POST http://localhost:3001/api/fallback/sort/intelligence \
+  -H "Authorization: Bearer freellmapi-your-key"
+```
+
+<Tip>
+  Put your highest-intelligence models at the top of the chain for best answer quality — the router will fall through to faster or cheaper models automatically when the top ones are rate-limited. If you are building a latency-sensitive application such as a voice interface or a real-time assistant, use the **speed** preset instead to put Groq and Cerebras first; they are typically 5–10× faster than cloud-hosted frontier models.
+</Tip>
+
+## Dynamic penalties
+
+Static priority numbers give you control at configuration time, but they cannot react to what is happening right now. Dynamic penalties fill this gap.
+
+When a model returns a 429 (or any retryable error), the proxy calls `recordRateLimitHit(modelDbId)` which adds **3** to that model's in-memory penalty (`PENALTY_PER_429 = 3`). The penalty is capped at **10** (`MAX_PENALTY = 10`). The router computes each model's `effectivePriority` as:
+
+```
+effectivePriority = base_priority + current_penalty
+```
+
+It then re-sorts the chain by `effectivePriority` before iterating. A model that was originally at priority 2 but has accumulated a penalty of 6 temporarily behaves as if it were at priority 8, letting lower-ranked but currently-working models jump ahead.
+
+Penalties decay automatically over time so models recover:
+
+- Every **2 minutes** since the last 429 hit, the penalty drops by **1** (`DECAY_AMOUNT = 1`, `DECAY_INTERVAL_MS = 2 min`).
+- A successful response reduces the penalty by 1 immediately via `recordSuccess()`.
+- Once the penalty reaches 0 the entry is removed from the penalty map and the model returns to its base priority.
+
+## Example API response
+
+The `GET /api/fallback` endpoint returns the full chain with live penalty data:
+
+```json
+[
+  {
+    "modelDbId": 3,
+    "priority": 1,
+    "effectivePriority": 1,
+    "penalty": 0,
+    "rateLimitHits": 0,
+    "enabled": true,
+    "platform": "openrouter",
+    "modelId": "minimax/minimax-m2.5:free",
+    "displayName": "MiniMax M2.5 (free)",
+    "intelligenceRank": 1,
+    "speedRank": 9,
+    "sizeLabel": "Frontier",
+    "rpmLimit": 20,
+    "rpdLimit": 200,
+    "monthlyTokenBudget": "~6M",
+    "keyCount": 2
+  },
+  {
+    "modelDbId": 7,
+    "priority": 2,
+    "effectivePriority": 5,
+    "penalty": 3,
+    "rateLimitHits": 1,
+    "enabled": true,
+    "platform": "groq",
+    "modelId": "llama-3.3-70b-versatile",
+    "displayName": "Llama 3.3 70B",
+    "intelligenceRank": 17,
+    "speedRank": 2,
+    "sizeLabel": "Medium",
+    "rpmLimit": 30,
+    "rpdLimit": 1000,
+    "monthlyTokenBudget": "~15M",
+    "keyCount": 1
+  }
+]
+```
+
+The `penalty` field shows the current in-memory penalty. The `effectivePriority` shows how the router actually treats this model when it builds the sorted list. `rateLimitHits` is the total number of 429s recorded for this model since the process started.
+
+## Reordering the chain
+
+**Dashboard:** Open the **Fallback Chain** page and drag rows to the desired order. Click **Save** to persist the new priorities. Use the toggle on each row to enable or disable individual models.
+
+**Admin API:** Send a `PUT /api/fallback` with the full updated list:
+
+```bash
+curl -X PUT http://localhost:3001/api/fallback \
+  -H "Authorization: Bearer freellmapi-your-key" \
+  -H "Content-Type: application/json" \
+  -d '[
+    { "modelDbId": 3, "priority": 1, "enabled": true },
+    { "modelDbId": 7, "priority": 2, "enabled": true },
+    { "modelDbId": 12, "priority": 3, "enabled": false }
+  ]'
+```
+
+The endpoint performs a full replace of all priorities in a single SQLite transaction, so the order you send is exactly what the router sees on the next request.

@@ -1,0 +1,181 @@
+---
+title: "Connect any OpenAI client to FreeLLMAPI"
+description: "How to point the Python openai library, TypeScript/Node openai package, curl, and LangChain at your FreeLLMAPI proxy with a single base URL change."
+---
+
+FreeLLMAPI exposes a `/v1/chat/completions` endpoint that is wire-compatible with the OpenAI API. Any client library that lets you override the base URL will work without modification — you change one setting and every call transparently routes across whichever providers you have configured. The examples below assume the server is running locally on port 3001 (the default). Replace `freellmapi-your-unified-key` with the key shown on the **Keys** page of the dashboard.
+
+<Tip>
+  Use `model="auto"` to let the router pick the best available model for each
+  request. Specify a concrete model ID (e.g. `"gemini-2.5-flash"`,
+  `"llama-3.3-70b-versatile"`) only when you need to pin behaviour to a
+  specific provider — for example, when benchmarking or when a downstream tool
+  requires a known model name. Pinning reduces fallover coverage: if that model
+  is rate-limited the request will fail rather than fall through to the next
+  available option.
+</Tip>
+
+## Basic usage
+
+<CodeGroup>
+
+```python Python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:3001/v1",
+    api_key="freellmapi-your-unified-key",
+)
+
+# Let the router pick the best available model
+resp = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Summarise the fall of Rome in one sentence."}],
+)
+print(resp.choices[0].message.content)
+
+# See which provider actually served the request
+print("Routed via:", resp.headers.get("x-routed-via"))
+```
+
+```typescript TypeScript / Node
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://localhost:3001/v1",
+  apiKey: "freellmapi-your-unified-key",
+});
+
+const resp = await client.chat.completions.create({
+  model: "auto",
+  messages: [{ role: "user", content: "Summarise the fall of Rome in one sentence." }],
+});
+
+console.log(resp.choices[0].message.content);
+console.log("Routed via:", resp.headers.get("x-routed-via"));
+```
+
+```bash curl
+curl http://localhost:3001/v1/chat/completions \
+  -H "Authorization: Bearer freellmapi-your-unified-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "messages": [{"role": "user", "content": "Summarise the fall of Rome in one sentence."}]
+  }'
+```
+
+</CodeGroup>
+
+## Pinning to a specific model
+
+Pass any model ID from `GET /v1/models` to route directly to a particular provider. The `model` field in the request is matched against the `model_id` column in the database.
+
+<CodeGroup>
+
+```python Python
+resp = client.chat.completions.create(
+    model="gemini-2.5-flash",   # always hit Google, fall back on rate limit
+    messages=[{"role": "user", "content": "What is 17 × 23?"}],
+)
+```
+
+```typescript TypeScript / Node
+const resp = await client.chat.completions.create({
+  model: "gemini-2.5-flash",
+  messages: [{ role: "user", content: "What is 17 × 23?" }],
+});
+```
+
+```bash curl
+curl http://localhost:3001/v1/chat/completions \
+  -H "Authorization: Bearer freellmapi-your-unified-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "What is 17 × 23?"}]}'
+```
+
+</CodeGroup>
+
+## Streaming
+
+Pass `stream=True` / `stream: true` to get Server-Sent Events. The SDK handles the chunked response automatically.
+
+<CodeGroup>
+
+```python Python
+stream = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Write a haiku about SQLite."}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+```typescript TypeScript / Node
+const stream = await client.chat.completions.create({
+  model: "auto",
+  messages: [{ role: "user", content: "Write a haiku about SQLite." }],
+  stream: true,
+});
+
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
+}
+```
+
+```bash curl (streaming)
+curl http://localhost:3001/v1/chat/completions \
+  -H "Authorization: Bearer freellmapi-your-unified-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "Write a haiku about SQLite."}], "stream": true}'
+```
+
+</CodeGroup>
+
+## LangChain
+
+LangChain's `ChatOpenAI` accepts an `openai_api_base` (Python) or `configuration.baseURL` (JS) override, making it a drop-in replacement.
+
+<CodeGroup>
+
+```python LangChain Python
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    model="auto",
+    openai_api_key="freellmapi-your-unified-key",
+    openai_api_base="http://localhost:3001/v1",
+)
+
+response = llm.invoke("Explain the CAP theorem in two sentences.")
+print(response.content)
+```
+
+```typescript LangChain JS
+import { ChatOpenAI } from "@langchain/openai";
+
+const llm = new ChatOpenAI({
+  model: "auto",
+  openAIApiKey: "freellmapi-your-unified-key",
+  configuration: {
+    baseURL: "http://localhost:3001/v1",
+  },
+});
+
+const response = await llm.invoke("Explain the CAP theorem in two sentences.");
+console.log(response.content);
+```
+
+</CodeGroup>
+
+## Response headers
+
+Every response from the proxy includes routing metadata in HTTP headers:
+
+| Header | Example | Description |
+|---|---|---|
+| `X-Routed-Via` | `groq/llama-3.3-70b-versatile` | The platform and model that actually served the request. |
+| `X-Fallback-Attempts` | `3` | Present only when the router had to retry; value is the number of failed attempts before success. |
+
+These headers are useful for observability. Log them from your application to understand which providers are absorbing load and how often the fallback chain is exercised.

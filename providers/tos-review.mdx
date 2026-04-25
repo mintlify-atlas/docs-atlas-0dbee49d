@@ -1,0 +1,79 @@
+---
+title: "Terms of Service review for free tiers"
+description: "Per-provider ToS compatibility assessment for personal single-user self-hosted use of FreeLLMAPI against each provider's free tier."
+---
+
+This page summarises a review of each provider's Terms of Service against a single, specific use case: **a self-hosted, single-user, personal FreeLLMAPI instance** that proxies free-tier inference for your own use. The review was conducted in April 2026. Terms change; check the current ToS yourself before making any decision you care about.
+
+<Warning>
+  This is informational only, not legal advice. Every provider's ToS is a legal contract between you and that provider. Reading this page does not substitute for reading the actual terms you agreed to when you created your account. If you have doubts, consult a lawyer or simply don't use that provider.
+</Warning>
+
+## Provider ToS status
+
+| Provider | Verdict | Notes |
+|---|---|---|
+| Google Gemini | ✅ Likely OK | No adverse clause; proxying for personal use is not prohibited. |
+| Groq | ✅ Likely OK | Explicitly permits integrating the API into a "Customer Application." |
+| Cerebras | ✅ Likely OK | Permitted for personal use; don't resell keys or share access. |
+| Mistral | ✅ Likely OK | APIs are allowed for personal and internal business use. |
+| OpenRouter | ✅ Likely OK | Private-use only — do not expose your proxy endpoint to the public internet. |
+| Hugging Face | ✅ Likely OK | BYO-key proxying is the documented pattern in the HF Inference API docs. |
+| Zhipu / Z.ai | ✅ Likely OK | Explicit "personal, non-commercial research" carve-out in the terms. |
+| Moonshot / Kimi | ✅ Likely OK | Competitive-products clause is broad but not aimed at single-user proxies. |
+| SambaNova | ⚠️ Ambiguous | Public terms are silent on API proxying specifically. |
+| MiniMax | ⚠️ Ambiguous | Public terms are silent on this pattern. |
+| Cloudflare Workers AI | ⚠️ Ambiguous | No adverse clause found; usage must stay within the Cloudflare AUP. |
+| NVIDIA NIM | ⚠️ Caution | Free tier is explicitly "evaluation only, not for production use." |
+| GitHub Models | ⚠️ Caution | Free tier is explicitly scoped to "experimentation." |
+| Cohere | ❌ Avoid | Trial ToS §14 explicitly forbids personal and household use. |
+
+## Provider-by-provider notes
+
+### ✅ Likely OK
+
+**Google Gemini** — The Google AI Studio and Gemini API terms do not prohibit proxying requests from your own applications. Nothing in the free-tier usage policy specifically bars a personal self-hosted proxy, provided you are the sole user.
+
+**Groq** — Groq's developer terms explicitly permit integrating the API into "Customer Applications." A personal proxy qualifies.
+
+**Cerebras** — Permitted for personal and research use. The key rule: don't resell access to your keys or share the endpoint with other people.
+
+**Mistral** — La Plateforme terms allow personal and internal business API use. The Experiment (free) tier is intended for development and research.
+
+**OpenRouter** — OpenRouter's free tier is for private use. Running a public-facing proxy that lets others access your OpenRouter key would violate the terms; a locked-down personal instance does not.
+
+**Hugging Face** — The recommended BYO-key pattern (your app calls the Inference API using your own token) is explicitly documented and supported by HF. This is exactly what FreeLLMAPI does.
+
+**Zhipu / Z.ai** — The bigmodel.cn terms include a "personal, non-commercial research" carve-out that covers single-user self-hosted use.
+
+**Moonshot / Kimi** — The competitive-products clause in the terms is broad, but is clearly aimed at companies building rival AI products, not individuals running personal tools. Note that Moonshot moved to a minimum-deposit model in April 2026, so the free tier may no longer be available.
+
+### ⚠️ Ambiguous or Caution
+
+**SambaNova** — The public-facing terms are largely silent on the specific question of API proxying. There is no explicit prohibition, but also no explicit permission. Low risk for personal use; higher risk if you ever expose the endpoint to others.
+
+**MiniMax** — Same situation as SambaNova: the terms do not address this pattern directly. Use for personal-only access and you are unlikely to have a problem.
+
+**Cloudflare Workers AI** — No adverse clause found in the Workers AI or Cloudflare developer terms as of April 2026. Standard Cloudflare AUP rules still apply (no abuse, no illegal content, etc.).
+
+**NVIDIA NIM** — NVIDIA's free inference tier documentation explicitly states that it is for **evaluation only and not for production use**. A personal development proxy is close to the intended use case, but the boundary is blurry enough to warrant caution. The NVIDIA platform also moved to a credit-based model in 2025, making the "free tier" largely nominal.
+
+**GitHub Models** — Microsoft's GitHub Models terms scope the free tier to **experimentation**. Personal tooling and prototyping sit within that scope; anything resembling production use does not. The per-day request caps (50 RPD for most models) also make it unsuitable for heavy workloads.
+
+### ❌ Avoid
+
+<Warning>
+  **Cohere Trial ToS §14** explicitly forbids personal and household use of the trial API. Adding a Cohere trial key to your FreeLLMAPI instance on a personal device or home server puts you in direct violation of the terms you accepted at signup. The `command-r-plus-08-2024` and `command-a-03-2025` models are seeded in FreeLLMAPI's catalog for completeness, but you should not enable them on a personal self-hosted instance.
+</Warning>
+
+**Cohere** — Unlike every other provider in this list, Cohere's trial tier is explicitly restricted by ToS. Section 14 of the Cohere trial terms states that the trial API is not for personal or household use. This is an unusual clause — most developer free tiers are silent on or permissive of personal use — but Cohere's is explicit. Until Cohere revises their terms, personal self-hosted use is not compliant.
+
+## Rules of thumb
+
+These guidelines keep you on safe ground with the "Likely OK" providers and reduce risk with the ambiguous ones:
+
+1. **One account per provider.** Don't create multiple accounts to stack quotas. This violates every provider's terms.
+2. **No reselling.** Don't charge other people for access to your FreeLLMAPI instance or to the upstream provider keys behind it.
+3. **No sharing your endpoint.** FreeLLMAPI is designed for single-user, local-first use. Exposing it to the internet and allowing others to query it through your provider keys turns a personal proxy into a shared service, which goes beyond what free tiers permit.
+4. **Don't treat a free tier as a paid production backend.** Free tiers exist to let developers prototype and experiment. Routing production traffic through them at sustained high volume is against the spirit of every free tier and, for some providers (NVIDIA, GitHub), against the letter of the terms.
+5. **Check for updates.** Terms change. If a provider is particularly valuable to your workflow, bookmark their terms page and re-read it periodically.

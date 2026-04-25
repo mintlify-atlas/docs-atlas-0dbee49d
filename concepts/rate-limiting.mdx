@@ -1,0 +1,87 @@
+---
+title: "Rate limit tracking in FreeLLMAPI"
+description: "FreeLLMAPI tracks per-key sliding-window counters for RPM, RPD, TPM, and TPD, blocking keys that exceed their limits before they ever reach the provider."
+---
+
+FreeLLMAPI enforces rate limits entirely in memory, without a round-trip to the upstream provider. Before any key is selected for a request, the router checks four independent counters: requests per minute, requests per day, tokens per minute, and tokens per day. If a key is over any limit it is skipped; the router moves to the next candidate. When a provider returns a 429 anyway — for example because the free-tier quota was hit outside of this process — a cooldown blocks that key for two minutes so no further requests are sent until it can recover.
+
+## The four limit dimensions
+
+| Dimension | Abbreviation | Window | What it counts |
+|---|---|---|---|
+| Requests per minute | RPM | Rolling 60 seconds | Number of API calls |
+| Requests per day | RPD | Rolling 24 hours | Number of API calls |
+| Tokens per minute | TPM | Rolling 60 seconds | Estimated total tokens (input + output) |
+| Tokens per day | TPD | Rolling 24 hours | Estimated total tokens (input + output) |
+
+Each dimension is tracked independently per `(platform, modelId, keyId)` triple. A key that is under its RPM but over its TPM is still blocked.
+
+## Sliding-window implementation
+
+The rate-limit state is stored in a `Map<string, Window>` in `server/src/services/ratelimit.ts`, where the key is a string of the form `platform:modelId:keyId:rpm` (or `rpd`, `tpm`, `tpd`). Each `Window` holds:
+
+```typescript
+interface Window {
+  timestamps: number[];           // unix ms timestamps for RPM/RPD
+  tokenCount: number;             // unused legacy field
+  tokenTimestamps: { ts: number; tokens: number }[]; // for TPM/TPD
+}
+```
+
+**Request tracking (RPM/RPD):** Every call timestamp is appended to `timestamps`. Before checking a limit, stale entries are pruned:
+
+```typescript
+function pruneTimestamps(timestamps: number[], windowMs: number, now: number): number[] {
+  const cutoff = now - windowMs;
+  return timestamps.filter(ts => ts > cutoff);
+}
+```
+
+For RPM, `windowMs` is 60 000 ms. For RPD, it is 86 400 000 ms. The length of the pruned array is compared to the configured limit.
+
+**Token tracking (TPM/TPD):** Each recorded token event is an object `{ ts, tokens }`. The same filter approach is used, and the sum of all `tokens` values within the window is compared to the configured limit.
+
+## Token estimation
+
+Token counts are estimated before the upstream call completes, because the router needs to decide whether a key can absorb the request without knowing the exact output length.
+
+<Note>
+  Input tokens are estimated as `Math.ceil(content.length / 4)` — approximately 4 characters per token for English text. Output tokens are estimated as `max_tokens ?? 1000`. Both values are summed and used to check TPM/TPD capacity. After the call completes, the actual token count (from the response's `usage` field, or from counting streamed characters) is recorded in place of the estimate.
+</Note>
+
+## Recording usage
+
+After a request is routed, two recording calls fire regardless of whether the upstream call succeeds:
+
+```typescript
+// Called as soon as the key is selected
+recordRequest(platform, modelId, keyId);
+
+// Called after the response is received
+recordTokens(platform, modelId, keyId, actualTokens);
+```
+
+`recordRequest` appends the current timestamp to both the RPM and RPD windows for that key. `recordTokens` appends a `{ ts, tokens }` entry to both the TPM and TPD windows. This means a failed request still counts against RPM/RPD — matching the behaviour of every upstream provider.
+
+## Cooldowns after a 429
+
+When the upstream provider returns a 429 (or any retryable error), the proxy calls:
+
+```typescript
+setCooldown(platform, modelId, keyId, 120_000); // 120 seconds
+```
+
+Internally this stores an expiry timestamp in a separate `cooldowns` map:
+
+```typescript
+cooldowns.set(`${platform}:${modelId}:${keyId}:cooldown`, Date.now() + durationMs);
+```
+
+`isOnCooldown()` checks this map before every routing decision. Expired entries are cleaned up lazily on the next check. During the cooldown period no requests are sent to that platform/model/key combination, giving the provider time to recover without needing to absorb further 429 responses.
+
+## How limits reset
+
+- **RPM** resets on a rolling basis: a request recorded 61 seconds ago is no longer counted against the current minute's limit. There is no fixed clock boundary.
+- **RPD** resets on a rolling 24-hour basis: a request recorded more than 86 400 seconds ago drops out of the window. This is a true rolling window, not a midnight cutover.
+
+Because the state is in-memory, limits reset to zero when the server process restarts. Providers' own server-side counters are unaffected by a restart, so you may still receive 429s after a restart if the upstream quota was genuinely exhausted.

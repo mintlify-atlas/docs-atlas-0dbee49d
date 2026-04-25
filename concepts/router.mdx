@@ -1,0 +1,135 @@
+---
+title: "How the FreeLLMAPI router works"
+description: "FreeLLMAPI's router selects models using fallback chain priority, dynamic 429 penalties, sticky sessions for multi-turn chats, and round-robin key balancing."
+---
+
+Every request to `/v1/chat/completions` passes through the router before a single token is generated. The router consults your fallback chain, adjusts priorities based on recent rate-limit behavior, honours sticky sessions for multi-turn conversations, and distributes load across keys using round-robin. If the chosen model or key fails, the router skips it and retries the next candidate — up to 20 times — before returning a 429 to the caller.
+
+## Architecture overview
+
+```
+┌──────────────────┐   Bearer freellmapi-…   ┌─────────────────────────┐
+│  OpenAI SDK /    │ ──────────────────────▶ │  Express proxy (:3001)  │
+│  curl / any      │ ◀────────────────────── │  /v1/chat/completions   │
+│  OpenAI client   │      streamed tokens    └────────────┬────────────┘
+└──────────────────┘                                      │
+                                                          ▼
+                             ┌────────────────────────────────────────────────┐
+                             │  Router                                        │
+                             │   1. Pick highest-priority model that          │
+                             │      (a) has a healthy key and                 │
+                             │      (b) is under all its rate limits.         │
+                             │   2. Decrypt key, call provider SDK.           │
+                             │   3. On 429/5xx → cooldown + retry next model. │
+                             └────────────────────────────────────────────────┘
+                                          │
+   ┌──────────────┬────────────┬──────────┴─────────┬─────────────┬──────────┐
+   ▼              ▼            ▼                    ▼             ▼          ▼
+ Google         Groq        Cerebras           OpenRouter        HF       …10 more
+```
+
+## Routing algorithm
+
+The full routing logic lives in `server/src/services/router.ts`. Each call to `routeRequest()` walks through these steps in order:
+
+<Steps>
+  <Step title="Fetch the fallback chain">
+    The router queries the `fallback_config` table and retrieves all entries ordered by their `priority` column (ascending). Lower numbers are tried first.
+
+    ```sql
+    SELECT fc.model_db_id, fc.priority, fc.enabled
+    FROM fallback_config fc
+    ORDER BY fc.priority ASC
+    ```
+  </Step>
+
+  <Step title="Apply dynamic penalties">
+    Each entry's `priority` is added to its current in-memory **penalty** to produce an `effectivePriority`. Models that have been returning 429s recently sink toward the bottom of the list automatically.
+
+    | Constant | Value | Meaning |
+    |---|---|---|
+    | `PENALTY_PER_429` | 3 | Priority positions added per 429 hit |
+    | `MAX_PENALTY` | 10 | Maximum penalty a model can accumulate |
+    | `DECAY_INTERVAL_MS` | 2 minutes | How often the penalty decays by one step |
+    | `DECAY_AMOUNT` | 1 | How many penalty points are removed per interval |
+
+    The list is then re-sorted by `effectivePriority` ascending, so a heavily penalised model falls behind others even if it has a lower base priority.
+  </Step>
+
+  <Step title="Apply sticky session (multi-turn conversations)">
+    If the incoming request is a continuation of an existing conversation (it contains at least one `assistant` message), the router looks up the `stickySessionMap` keyed on the first 100 characters of the first user message.
+
+    When a matching entry is found and it is within the 30-minute TTL, the preferred `modelDbId` is moved to the **front** of the sorted chain before iteration begins. This keeps a multi-turn conversation talking to the same model and prevents the hallucination spike that occurs when the model switches mid-conversation.
+
+    Sessions expire after **30 minutes** of inactivity (`STICKY_TTL_MS = 30 * 60 * 1000`). The map is pruned automatically when it grows beyond 500 entries.
+  </Step>
+
+  <Step title="Round-robin across keys for the selected model">
+    For the model at the head of the chain, the router fetches all enabled keys for that platform with a status that is not `invalid`. It maintains a `roundRobinIndex` map keyed on `platform:modelId` so successive calls cycle through keys evenly — no single key bears the full load.
+
+    ```typescript
+    const rrKey = `${model.platform}:${model.model_id}`;
+    let idx = roundRobinIndex.get(rrKey) ?? 0;
+
+    for (let attempt = 0; attempt < keys.length; attempt++) {
+      const key = keys[idx % keys.length];
+      idx++;
+      // ... check and use the key
+    }
+    ```
+  </Step>
+
+  <Step title="Check cooldown and rate-limit counters">
+    Before using a key, the router runs two checks:
+
+    1. **Cooldown** — `isOnCooldown(platform, modelId, keyId)` returns `true` if a previous 429 put this combination on a 120-second block. The key is skipped entirely.
+    2. **Capacity** — `canMakeRequest()` verifies the RPM and RPD sliding-window counters are under limit. `canUseTokens()` verifies the TPM and TPD token budgets can absorb the estimated request size.
+
+    A key that fails either check is skipped; the round-robin loop moves on to the next key for the same model. If no keys pass for this model, the outer loop advances to the next model in the chain.
+  </Step>
+
+  <Step title="Decrypt key and call provider">
+    Once a valid key is found, the router calls `decrypt(key.encrypted_key, key.iv, key.auth_tag)` to recover the plaintext API key in memory. The decrypted value is **never written to disk or logged**; it exists only for the duration of the HTTP call to the upstream provider.
+
+    The router returns a `RouteResult` object containing the provider instance, model ID, key, and metadata. The proxy handler in `proxy.ts` uses this to call `provider.chatCompletion()` or `provider.streamChatCompletion()`.
+  </Step>
+</Steps>
+
+## The MAX_RETRIES retry loop
+
+The proxy wraps the entire routing and provider call inside a loop that runs up to **20 times** (`MAX_RETRIES = 20` in `proxy.ts`):
+
+```typescript
+const MAX_RETRIES = 20;
+const skipKeys = new Set<string>();
+
+for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+  const route = routeRequest(estimatedTotal, skipKeys, preferredModel);
+  // call provider...
+  // on retryable error:
+  skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
+  setCooldown(route.platform, route.modelId, route.keyId, 120_000);
+  recordRateLimitHit(route.modelDbId);
+}
+```
+
+Errors that trigger a retry include 429, 5xx, timeouts, connection resets, and quota messages. On each retry, the failed `platform:modelId:keyId` triple is added to `skipKeys`, so `routeRequest()` will not pick it again within this request. If all 20 attempts fail, the proxy returns a `429` to the caller.
+
+Non-retryable errors (auth failures, malformed requests, other 4xx codes) skip the retry loop and return `502` immediately.
+
+## Response headers
+
+Every successful response carries routing metadata in its headers:
+
+| Header | Example | Meaning |
+|---|---|---|
+| `X-Routed-Via` | `groq/llama-3.3-70b-versatile` | The platform and model that served this request |
+| `X-Fallback-Attempts` | `3` | How many models were tried before success (absent on first-attempt success) |
+
+You can read these headers from any OpenAI SDK:
+
+```python
+resp = client.chat.completions.create(model="auto", messages=[...])
+print(resp.headers.get("x-routed-via"))        # e.g. "groq/llama-3.3-70b-versatile"
+print(resp.headers.get("x-fallback-attempts")) # e.g. "2", or None
+```

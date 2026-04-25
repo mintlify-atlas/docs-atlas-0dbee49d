@@ -1,0 +1,210 @@
+---
+title: "Admin API: fallback chain configuration"
+description: "Read, reorder, and apply built-in sort presets to the FreeLLMAPI fallback chain. Also exposes live penalty data and monthly token budget consumption per model."
+---
+
+The fallback chain defines the order in which FreeLLMAPI tries models when routing a request. When a model returns a rate-limit error, the router applies a dynamic penalty that temporarily lowers its priority so subsequent requests prefer healthier models. These endpoints let you read the current chain, reorder it manually, apply a built-in sort preset, and inspect monthly token budget consumption.
+
+## Endpoints
+
+### Get the fallback chain
+
+Returns the full ordered list of models in the fallback chain, enriched with dynamic penalty data and key counts.
+
+```http
+GET /api/fallback
+```
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/api/fallback
+```
+
+</CodeGroup>
+
+**Response** — array of fallback entries
+
+<ResponseField name="[]" type="object[]">
+  <Expandable title="Fallback entry properties" defaultOpen>
+    <ResponseField name="modelDbId" type="number">
+      Internal database ID of the model.
+    </ResponseField>
+    <ResponseField name="priority" type="number">
+      Configured base priority (lower = tried first).
+    </ResponseField>
+    <ResponseField name="effectivePriority" type="number">
+      `priority` plus the current dynamic penalty. This is the value the router actually sorts by.
+    </ResponseField>
+    <ResponseField name="penalty" type="number">
+      Current penalty offset applied to this model. Accumulates when the model returns 429 responses and decays over time.
+    </ResponseField>
+    <ResponseField name="rateLimitHits" type="number">
+      Number of consecutive 429 responses that built up the current penalty.
+    </ResponseField>
+    <ResponseField name="enabled" type="boolean">
+      Whether this entry is active in the chain.
+    </ResponseField>
+    <ResponseField name="platform" type="string">
+      Provider platform (e.g. `groq`, `google`).
+    </ResponseField>
+    <ResponseField name="modelId" type="string">
+      Model identifier as used by the provider's API.
+    </ResponseField>
+    <ResponseField name="displayName" type="string">
+      Human-readable model name.
+    </ResponseField>
+    <ResponseField name="intelligenceRank" type="number">
+      Relative intelligence ranking (lower = smarter).
+    </ResponseField>
+    <ResponseField name="speedRank" type="number">
+      Relative speed ranking (lower = faster).
+    </ResponseField>
+    <ResponseField name="sizeLabel" type="string">
+      Model size category (e.g. `"8B"`, `"70B"`).
+    </ResponseField>
+    <ResponseField name="rpmLimit" type="number | null">
+      Requests-per-minute limit for this model, or `null` if unknown.
+    </ResponseField>
+    <ResponseField name="rpdLimit" type="number | null">
+      Requests-per-day limit for this model, or `null` if unknown.
+    </ResponseField>
+    <ResponseField name="monthlyTokenBudget" type="string">
+      Approximate monthly free-tier token budget (e.g. `"~120M"`).
+    </ResponseField>
+    <ResponseField name="keyCount" type="number">
+      Number of enabled keys available for this platform.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  `effectivePriority` is computed at request time from `priority + penalty`. When a model accumulates 429 responses, its `effectivePriority` grows, pushing it further down the routing order until the penalty decays.
+</Note>
+
+---
+
+### Update the fallback chain
+
+Replaces the priority and enabled state for every entry in the chain. Send the full list; any entry not included retains its previous values.
+
+```http
+PUT /api/fallback
+```
+
+**Request body** — array of update objects
+
+<ParamField body="[].modelDbId" type="number" required>
+  The `modelDbId` of the entry to update.
+</ParamField>
+
+<ParamField body="[].priority" type="number" required>
+  New base priority value. Lower numbers are tried first.
+</ParamField>
+
+<ParamField body="[].enabled" type="boolean" required>
+  Whether this model should participate in routing.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X PUT http://localhost:3001/api/fallback \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"modelDbId": 1, "priority": 1, "enabled": true},
+    {"modelDbId": 2, "priority": 2, "enabled": true},
+    {"modelDbId": 3, "priority": 3, "enabled": false}
+  ]'
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="success" type="boolean">
+  `true` when all updates were committed.
+</ResponseField>
+
+---
+
+### Apply a sort preset
+
+Reorders the fallback chain by a built-in sort strategy. Priority values are reassigned starting from 1 based on the chosen criterion.
+
+```http
+POST /api/fallback/sort/:preset
+```
+
+<ParamField path="preset" type="string" required>
+  Sort strategy to apply. Must be one of:
+  - `intelligence` — sort by intelligence rank ascending (highest-capability models first)
+  - `speed` — sort by speed rank ascending (fastest models first)
+  - `budget` — sort by monthly token budget descending (highest free-tier capacity first)
+</ParamField>
+
+<CodeGroup>
+
+```bash curl – sort by intelligence
+curl -X POST http://localhost:3001/api/fallback/sort/intelligence
+```
+
+```bash curl – sort by speed
+curl -X POST http://localhost:3001/api/fallback/sort/speed
+```
+
+```bash curl – sort by budget
+curl -X POST http://localhost:3001/api/fallback/sort/budget
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="success" type="boolean">
+  `true` when the reorder was applied.
+</ResponseField>
+<ResponseField name="preset" type="string">
+  The preset that was applied.
+</ResponseField>
+
+---
+
+### Get token usage
+
+Returns total monthly token budget across all enabled models with active keys, plus tokens consumed so far this calendar month.
+
+```http
+GET /api/fallback/token-usage
+```
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/api/fallback/token-usage
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="totalBudget" type="number">
+  Sum of monthly token budgets (in tokens) across all eligible models.
+</ResponseField>
+<ResponseField name="totalUsed" type="number">
+  Total tokens (input + output) consumed since the start of the current calendar month.
+</ResponseField>
+<ResponseField name="models" type="object[]">
+  Per-model breakdown, ordered by fallback priority.
+  <Expandable title="Model budget entry properties">
+    <ResponseField name="displayName" type="string">
+      Human-readable model name.
+    </ResponseField>
+    <ResponseField name="platform" type="string">
+      Provider platform.
+    </ResponseField>
+    <ResponseField name="budget" type="number">
+      Parsed monthly token budget for this model (in tokens).
+    </ResponseField>
+  </Expandable>
+</ResponseField>

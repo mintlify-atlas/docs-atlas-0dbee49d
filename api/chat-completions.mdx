@@ -1,0 +1,512 @@
+---
+title: "POST /v1/chat/completions"
+description: "OpenAI-compatible chat completions endpoint. Accepts messages, model, tools, streaming. Routes across 14 free-tier providers automatically."
+---
+
+The `/v1/chat/completions` endpoint is the core of FreeLLMAPI. It accepts the same request shape as the OpenAI Chat Completions API and routes each request to the best available free-tier provider — automatically falling back across up to 20 candidates when a provider is rate-limited or unavailable. Sticky sessions keep multi-turn conversations on the same model for 30 minutes to avoid hallucination from mid-conversation model switches.
+
+## Endpoint
+
+```
+POST /v1/chat/completions
+```
+
+## Authentication
+
+Pass your unified FreeLLMAPI key as a Bearer token in the `Authorization` header. Requests originating from `localhost` (127.0.0.1 or ::1) skip the auth check entirely.
+
+```
+Authorization: Bearer freellmapi-your-unified-key
+```
+
+You can find your unified key on the **Keys** page of the admin dashboard. This key is separate from any upstream provider credentials — you never expose those to your applications.
+
+## Request body
+
+<ParamField body="messages" type="object[]" required>
+  Array of chat messages forming the conversation. Must contain at least one message.
+
+  <Expandable title="Message types">
+    **System message**
+
+    <ParamField body="role" type="string" required>
+      Must be `"system"`.
+    </ParamField>
+    <ParamField body="content" type="string" required>
+      System prompt text.
+    </ParamField>
+    <ParamField body="name" type="string">
+      Optional name for the participant.
+    </ParamField>
+
+    ---
+
+    **User message**
+
+    <ParamField body="role" type="string" required>
+      Must be `"user"`.
+    </ParamField>
+    <ParamField body="content" type="string" required>
+      The user's message text.
+    </ParamField>
+    <ParamField body="name" type="string">
+      Optional name for the participant.
+    </ParamField>
+
+    ---
+
+    **Assistant message**
+
+    <ParamField body="role" type="string" required>
+      Must be `"assistant"`.
+    </ParamField>
+    <ParamField body="content" type="string">
+      The assistant's response text. Either `content` or `tool_calls` must be present.
+    </ParamField>
+    <ParamField body="tool_calls" type="object[]">
+      Tool calls requested by the assistant. Each entry has `id` (string), `type` (`"function"`), and `function` (`name` + `arguments` as a JSON string).
+    </ParamField>
+    <ParamField body="name" type="string">
+      Optional name for the participant.
+    </ParamField>
+
+    ---
+
+    **Tool result message**
+
+    <ParamField body="role" type="string" required>
+      Must be `"tool"`.
+    </ParamField>
+    <ParamField body="content" type="string" required>
+      The result returned by the tool.
+    </ParamField>
+    <ParamField body="tool_call_id" type="string" required>
+      The `id` of the tool call this result corresponds to.
+    </ParamField>
+    <ParamField body="name" type="string">
+      Optional name for the tool.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="model" type="string">
+  Model ID to request, or `"auto"` to let the router pick the highest-priority available model. If the specified model is unavailable, the router falls back automatically. Omitting this field is equivalent to `"auto"`.
+</ParamField>
+
+<ParamField body="temperature" type="number">
+  Sampling temperature between `0` and `2`. Higher values produce more varied output; lower values are more deterministic. Passed through to the underlying provider unchanged.
+</ParamField>
+
+<ParamField body="max_tokens" type="number">
+  Maximum number of tokens to generate. Must be a positive integer. Passed through to the underlying provider unchanged.
+</ParamField>
+
+<ParamField body="top_p" type="number">
+  Nucleus sampling parameter between `0` and `1`. An alternative to `temperature` — most providers recommend setting one or the other, not both.
+</ParamField>
+
+<ParamField body="stream" type="boolean">
+  When `true`, the response is streamed as Server-Sent Events (SSE). Each event is a `data:` line containing a `ChatCompletionChunk` JSON object. The stream ends with `data: [DONE]`.
+</ParamField>
+
+<ParamField body="tools" type="object[]">
+  OpenAI-style tool definitions. Each entry must have `type: "function"` and a `function` object with at minimum a `name`. Providers that don't natively support tool calling are skipped by the router when tools are present.
+
+  <Expandable title="Tool definition shape">
+    <ParamField body="type" type="string" required>
+      Must be `"function"`.
+    </ParamField>
+    <ParamField body="function.name" type="string" required>
+      Name of the function the model may call.
+    </ParamField>
+    <ParamField body="function.description" type="string">
+      Description of what the function does. Models use this to decide when to call it.
+    </ParamField>
+    <ParamField body="function.parameters" type="object">
+      JSON Schema describing the function's parameters.
+    </ParamField>
+    <ParamField body="function.strict" type="boolean">
+      When `true`, the model must strictly follow the schema. Support varies by provider.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="tool_choice" type="string | object">
+  Controls whether and how the model calls tools. Accepts:
+  - `"none"` — the model will not call any tools.
+  - `"auto"` — the model decides whether to call a tool.
+  - `"required"` — the model must call at least one tool.
+  - `{"type": "function", "function": {"name": "<name>"}}` — forces a specific function call.
+</ParamField>
+
+<ParamField body="parallel_tool_calls" type="boolean">
+  When `true`, the model may call multiple tools in a single turn. Passed through to providers that support it.
+</ParamField>
+
+## Response
+
+### Non-streaming response
+
+A successful non-streaming request returns a JSON object with the following shape.
+
+<ResponseField name="id" type="string" required>
+  Unique completion identifier, e.g. `"chatcmpl-1714000000000-abc123"`.
+</ResponseField>
+
+<ResponseField name="object" type="string" required>
+  Always `"chat.completion"`.
+</ResponseField>
+
+<ResponseField name="created" type="number" required>
+  Unix timestamp (seconds) when the completion was created.
+</ResponseField>
+
+<ResponseField name="model" type="string" required>
+  The model ID that produced the response, as reported by the upstream provider.
+</ResponseField>
+
+<ResponseField name="choices" type="object[]" required>
+  Array of completion choices. FreeLLMAPI always returns exactly one choice (`n > 1` is not supported).
+
+  <Expandable title="Choice fields">
+    <ResponseField name="index" type="number" required>
+      Choice index, always `0`.
+    </ResponseField>
+    <ResponseField name="message" type="object" required>
+      The assistant's response message.
+
+      <Expandable title="Message fields">
+        <ResponseField name="role" type="string" required>
+          Always `"assistant"`.
+        </ResponseField>
+        <ResponseField name="content" type="string | null" required>
+          Text content of the response. `null` when the model issued a tool call instead.
+        </ResponseField>
+        <ResponseField name="tool_calls" type="object[]">
+          Tool calls requested by the model. Present when `finish_reason` is `"tool_calls"`.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="finish_reason" type="string | null" required>
+      Why the model stopped. Common values: `"stop"`, `"tool_calls"`, `"length"`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="usage" type="object" required>
+  Token counts for the request.
+
+  <Expandable title="Usage fields">
+    <ResponseField name="prompt_tokens" type="number" required>
+      Tokens in the input messages.
+    </ResponseField>
+    <ResponseField name="completion_tokens" type="number" required>
+      Tokens in the generated response.
+    </ResponseField>
+    <ResponseField name="total_tokens" type="number" required>
+      Sum of `prompt_tokens` and `completion_tokens`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Response headers
+
+Every response includes routing metadata in the HTTP headers.
+
+| Header | Description |
+|---|---|
+| `X-Routed-Via` | The platform and model that served the request, e.g. `google/gemini-2.5-flash`. |
+| `X-Fallback-Attempts` | Number of providers tried before a successful response. Only present when fallback occurred. |
+
+### Streaming response
+
+When `stream: true`, the server sends an `text/event-stream` response. Each chunk is a `data:` line followed by two newlines. The stream ends with a `[DONE]` sentinel.
+
+```
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1714000000,"model":"gemini-2.5-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1714000000,"model":"gemini-2.5-flash","choices":[{"index":0,"delta":{"content":" there"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1714000000,"model":"gemini-2.5-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+Each chunk's `choices[0].delta` contains the incremental `content` (and optionally `tool_calls`) for that event.
+
+## Error responses
+
+| Status | Type | Description |
+|---|---|---|
+| `400` | `invalid_request_error` | The request body failed schema validation. The error message lists the specific fields. |
+| `401` | `authentication_error` | The `Authorization` header was present but the token did not match the unified key. |
+| `429` | `rate_limit_error` | All available models are currently rate-limited. Retry after a short delay. |
+| `502` | `provider_error` | The selected provider returned a non-retryable error (e.g. auth failure, 4xx). |
+| `503` | `routing_error` | The router could not find a suitable model (e.g. no keys configured). |
+
+Error responses follow this shape:
+
+```json
+{
+  "error": {
+    "message": "Human-readable description of the error.",
+    "type": "error_type_string"
+  }
+}
+```
+
+## Examples
+
+### Basic request
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/v1/chat/completions \
+  -H "Authorization: Bearer freellmapi-your-unified-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "messages": [
+      {"role": "user", "content": "Explain the CAP theorem in one paragraph."}
+    ]
+  }'
+```
+
+```python Python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:3001/v1",
+    api_key="freellmapi-your-unified-key",
+)
+
+response = client.chat.completions.create(
+    model="auto",
+    messages=[
+        {"role": "user", "content": "Explain the CAP theorem in one paragraph."}
+    ],
+)
+
+print(response.choices[0].message.content)
+print("Routed via:", response.headers.get("x-routed-via"))
+```
+
+```typescript TypeScript
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://localhost:3001/v1",
+  apiKey: "freellmapi-your-unified-key",
+});
+
+const response = await client.chat.completions.create({
+  model: "auto",
+  messages: [
+    { role: "user", content: "Explain the CAP theorem in one paragraph." },
+  ],
+});
+
+console.log(response.choices[0].message.content);
+```
+
+</CodeGroup>
+
+### Streaming request
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/v1/chat/completions \
+  -H "Authorization: Bearer freellmapi-your-unified-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "Write a haiku about distributed systems."}
+    ]
+  }'
+```
+
+```python Python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:3001/v1",
+    api_key="freellmapi-your-unified-key",
+)
+
+stream = client.chat.completions.create(
+    model="auto",
+    stream=True,
+    messages=[
+        {"role": "user", "content": "Write a haiku about distributed systems."}
+    ],
+)
+
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+```typescript TypeScript
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://localhost:3001/v1",
+  apiKey: "freellmapi-your-unified-key",
+});
+
+const stream = await client.chat.completions.create({
+  model: "auto",
+  stream: true,
+  messages: [
+    { role: "user", content: "Write a haiku about distributed systems." },
+  ],
+});
+
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
+}
+```
+
+</CodeGroup>
+
+### Tool calling
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/v1/chat/completions \
+  -H "Authorization: Bearer freellmapi-your-unified-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "messages": [
+      {"role": "user", "content": "What is the weather in Karachi?"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get current weather for a city.",
+          "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "required"
+  }'
+```
+
+```python Python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:3001/v1",
+    api_key="freellmapi-your-unified-key",
+)
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
+
+# Step 1: model requests a tool call
+first = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "What is the weather in Karachi?"}],
+    tools=tools,
+    tool_choice="required",
+)
+call = first.choices[0].message.tool_calls[0]
+
+# Step 2: run your tool and send the result back
+final = client.chat.completions.create(
+    model="auto",
+    messages=[
+        {"role": "user", "content": "What is the weather in Karachi?"},
+        first.choices[0].message,
+        {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": '{"temp_c": 32, "condition": "sunny"}',
+        },
+    ],
+    tools=tools,
+)
+print(final.choices[0].message.content)
+```
+
+```typescript TypeScript
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://localhost:3001/v1",
+  apiKey: "freellmapi-your-unified-key",
+});
+
+const tools: OpenAI.ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "get_weather",
+      description: "Get current weather for a city.",
+      parameters: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+      },
+    },
+  },
+];
+
+// Step 1: model requests a tool call
+const first = await client.chat.completions.create({
+  model: "auto",
+  messages: [{ role: "user", content: "What is the weather in Karachi?" }],
+  tools,
+  tool_choice: "required",
+});
+const call = first.choices[0].message.tool_calls![0];
+
+// Step 2: run your tool and send the result back
+const final = await client.chat.completions.create({
+  model: "auto",
+  messages: [
+    { role: "user", content: "What is the weather in Karachi?" },
+    first.choices[0].message,
+    {
+      role: "tool",
+      tool_call_id: call.id,
+      content: JSON.stringify({ temp_c: 32, condition: "sunny" }),
+    },
+  ],
+  tools,
+});
+console.log(final.choices[0].message.content);
+```
+
+</CodeGroup>
+
+<Note>
+  Localhost requests (`127.0.0.1`, `::1`) skip the auth check, so you can omit the `Authorization` header when calling from the same machine.
+</Note>
+
+<Warning>
+  Once streaming begins, the server commits to the chosen provider and cannot retry on failure. For critical requests, prefer non-streaming so the router can transparently fall back.
+</Warning>

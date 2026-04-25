@@ -1,0 +1,186 @@
+---
+title: "Admin API: key health status and checks"
+description: "View per-platform key health summaries and trigger on-demand validation checks for individual keys or all stored provider keys in FreeLLMAPI's database."
+---
+
+The health endpoints give you a real-time view of every provider key stored in FreeLLMAPI and let you trigger validation checks on demand. Each provider adapter implements a `validateKey()` method that makes a lightweight call to the provider's API (typically a model list or minimal inference request) and records whether the key is healthy, rate-limited, invalid, or erroring. Results are written back to the database and reflected in `GET /api/health`.
+
+## Endpoints
+
+### Get health status
+
+Returns a platform-level summary and a flat list of individual key statuses.
+
+```http
+GET /api/health
+```
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/api/health
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="platforms" type="object[]">
+  One entry per platform that has at least one stored key.
+  <Expandable title="Platform summary properties">
+    <ResponseField name="platform" type="string">
+      Provider platform identifier (e.g. `groq`, `google`).
+    </ResponseField>
+    <ResponseField name="hasProvider" type="boolean">
+      Whether FreeLLMAPI has a registered adapter for this platform. Keys on platforms without an adapter cannot be validated.
+    </ResponseField>
+    <ResponseField name="totalKeys" type="number">
+      Total number of keys stored for this platform.
+    </ResponseField>
+    <ResponseField name="healthyKeys" type="number">
+      Keys with status `healthy`.
+    </ResponseField>
+    <ResponseField name="rateLimitedKeys" type="number">
+      Keys with status `rate_limited`.
+    </ResponseField>
+    <ResponseField name="invalidKeys" type="number">
+      Keys with status `invalid`.
+    </ResponseField>
+    <ResponseField name="errorKeys" type="number">
+      Keys with status `error`.
+    </ResponseField>
+    <ResponseField name="unknownKeys" type="number">
+      Keys with status `unknown` (not yet checked).
+    </ResponseField>
+    <ResponseField name="enabledKeys" type="number">
+      Keys that are currently enabled and eligible for routing.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="keys" type="object[]">
+  Full list of individual keys, ordered by platform then creation date descending.
+  <Expandable title="Key status properties">
+    <ResponseField name="id" type="number">
+      Unique numeric key ID.
+    </ResponseField>
+    <ResponseField name="platform" type="string">
+      Provider platform.
+    </ResponseField>
+    <ResponseField name="label" type="string">
+      Optional label assigned to the key.
+    </ResponseField>
+    <ResponseField name="status" type="string">
+      Current health status: `healthy`, `rate_limited`, `invalid`, `error`, or `unknown`.
+    </ResponseField>
+    <ResponseField name="enabled" type="boolean">
+      Whether this key is active.
+    </ResponseField>
+    <ResponseField name="createdAt" type="string">
+      ISO 8601 creation timestamp.
+    </ResponseField>
+    <ResponseField name="lastCheckedAt" type="string | null">
+      ISO 8601 timestamp of the last health check, or `null` if never checked.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Check a specific key
+
+Runs `validateKey()` for a single key and updates its status in the database. The call is synchronous — it waits for the provider response before returning.
+
+```http
+POST /api/health/check/:keyId
+```
+
+<ParamField path="keyId" type="number" required>
+  Numeric ID of the key to validate.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST http://localhost:3001/api/health/check/7
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="keyId" type="number">
+  The ID of the key that was checked.
+</ResponseField>
+<ResponseField name="status" type="string">
+  The new health status written to the database: `healthy`, `rate_limited`, `invalid`, `error`, or `unknown`.
+</ResponseField>
+
+---
+
+### Check all keys
+
+Runs `validateKey()` for every key in the database. This is the same routine triggered by the background scheduler. The endpoint returns immediately once all checks are enqueued and awaited.
+
+```http
+POST /api/health/check-all
+```
+
+<CodeGroup>
+
+```bash curl
+curl -X POST http://localhost:3001/api/health/check-all
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="success" type="boolean">
+  `true` when all checks have completed.
+</ResponseField>
+
+<Note>
+  Checking all keys can take several seconds if you have many keys across multiple providers, as each check requires a network round-trip to the provider's API.
+</Note>
+
+---
+
+### Ping
+
+Lightweight liveness check for the server process. Does not touch the database or any provider.
+
+```http
+GET /api/ping
+```
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/api/ping
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="status" type="string">
+  Always `"ok"`.
+</ResponseField>
+<ResponseField name="timestamp" type="string">
+  Current server time as an ISO 8601 string.
+</ResponseField>
+
+---
+
+## How health checks work
+
+Each provider adapter in FreeLLMAPI implements a `validateKey(key: string)` method. When a health check is triggered, the adapter decrypts the stored key and uses it to make a minimal authenticated request to the provider — typically listing available models or sending a single-token completion. Based on the HTTP response, the adapter returns one of the five status values, which is then written back to the `api_keys` table.
+
+| Status | Trigger |
+|---|---|
+| `healthy` | Provider returned a successful response. |
+| `rate_limited` | Provider returned HTTP 429. |
+| `invalid` | Provider rejected the key (HTTP 401 or equivalent). |
+| `error` | Network failure, timeout, or unexpected HTTP 5xx. |
+| `unknown` | Key has not been checked since it was added. |

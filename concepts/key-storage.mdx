@@ -1,0 +1,103 @@
+---
+title: "How FreeLLMAPI stores API keys"
+description: "Provider API keys are AES-256-GCM encrypted in SQLite. Clients use one unified bearer token — upstream provider credentials never leave the server in plaintext."
+---
+
+FreeLLMAPI never writes a plaintext provider API key to disk. When you add a key through the dashboard or the Admin API, the server encrypts it with AES-256-GCM immediately and stores only the ciphertext, a random initialisation vector, and an authentication tag in SQLite. Decryption happens in memory, at the moment a request is routed, and the plaintext value is discarded as soon as the upstream HTTP call is dispatched.
+
+## AES-256-GCM encryption scheme
+
+The encryption logic lives in `server/src/lib/crypto.ts`. The algorithm is `aes-256-gcm` — a symmetric, authenticated cipher that provides both confidentiality and tamper detection via the auth tag.
+
+```typescript
+const ALGORITHM = 'aes-256-gcm';
+
+export function encrypt(text: string): { encrypted: string; iv: string; authTag: string } {
+  const key = getEncryptionKey();          // 32-byte Buffer from ENCRYPTION_KEY env
+  const iv = crypto.randomBytes(16);       // fresh random IV per key stored
+  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const authTag = cipher.getAuthTag().toString('hex');
+
+  return { encrypted, iv: iv.toString('hex'), authTag };
+}
+```
+
+Each provider key gets its **own random 16-byte IV**. This means two identical API keys stored for the same provider will produce different ciphertexts — no information leaks about key reuse across entries.
+
+The three values (`encrypted_key`, `iv`, `auth_tag`) are stored as hex strings in the `api_keys` table. Decryption reconstructs the key by reversing this process and verifying the auth tag. If the auth tag does not match — because the data was tampered with or the wrong encryption key was used — the decryption call throws and the request fails before reaching any provider.
+
+### Encryption key precedence
+
+On startup, `initEncryptionKey()` resolves the master key in this order:
+
+1. The `ENCRYPTION_KEY` environment variable (a 64-character hex string representing 32 bytes)
+2. A persisted value in the `settings` table under the key `encryption_key`
+3. A freshly generated random key, which is then persisted in the `settings` table
+
+<Warning>
+  If you lose the `ENCRYPTION_KEY` value used when your provider keys were stored, all stored keys become permanently unreadable. The auth tag verification will fail on every decryption attempt. You will need to delete all existing `api_keys` rows and re-add each provider key. Always back up your `ENCRYPTION_KEY` value somewhere safe — a password manager, a secrets manager, or an encrypted vault — before deploying to production.
+</Warning>
+
+## The unified API key
+
+Your OpenAI SDK does not speak directly to Google, Groq, or any other provider. It speaks to your FreeLLMAPI proxy using a **single bearer token** — the unified API key. This key is generated once on first startup and stored in the `settings` table:
+
+```typescript
+function ensureUnifiedKey(db: Database.Database) {
+  const existing = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get();
+  if (!existing) {
+    const key = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
+    db.prepare("INSERT INTO settings (key, value) VALUES ('unified_api_key', ?)").run(key);
+  }
+}
+```
+
+The resulting token looks like `freellmapi-a3f8c2...` (48 hex characters after the prefix, for 192 bits of entropy). Every incoming request to `/v1/chat/completions` that originates from a non-localhost address is validated against this token.
+
+<Note>
+  The unified API key survives server restarts because it is persisted in SQLite alongside the provider keys. You only need to rotate it manually (via the **Keys** page in the dashboard or by calling the regenerate endpoint). Your applications' `OPENAI_API_KEY` value does not need to change unless you deliberately regenerate it.
+</Note>
+
+This design means your provider credentials are never exposed to your applications. An application compromise reveals only the unified key, not the upstream provider keys stored on the server.
+
+## Key lifecycle and status
+
+Every entry in `api_keys` has a `status` column that reflects the result of the most recent health check:
+
+```typescript
+export type KeyStatus = 'healthy' | 'rate_limited' | 'invalid' | 'error' | 'unknown';
+```
+
+| Status | Meaning |
+|---|---|
+| `unknown` | Freshly added; no health check has run yet |
+| `healthy` | Last probe succeeded — key is valid and accepted by the provider |
+| `rate_limited` | Provider returned a 429 during a health probe |
+| `invalid` | Provider rejected the key as unauthorised; it will not be used for routing |
+| `error` | The health check threw an unexpected error (network failure, timeout, etc.) |
+
+The health service (`server/src/services/health.ts`) probes all enabled keys every **5 minutes**. After **3 consecutive failures**, a key is automatically disabled (`enabled = 0`) so the router stops reaching for it entirely.
+
+The lifecycle of a newly added key:
+
+1. Key is added via the dashboard or `POST /api/keys`
+2. Server calls `encrypt()` and inserts the row with `status = 'unknown'`
+3. The health checker runs within the next 5 minutes and calls `provider.validateKey(apiKey)`
+4. On success the row is updated to `status = 'healthy'`; on failure it moves to `invalid` or `error`
+5. The router uses all keys with `status != 'invalid'` and `enabled = 1`
+
+## Key masking in the UI
+
+The dashboard never displays plaintext keys. When the server returns key data to the admin UI, it calls `maskKey()` before serialising the response:
+
+```typescript
+export function maskKey(key: string): string {
+  if (key.length <= 8) return '****' + key.slice(-4);
+  return key.slice(0, 4) + '...' + key.slice(-4);
+}
+```
+
+A key like `gsk_abc123xyz789` is displayed as `gsk_...789`. The `ApiKey` interface in `shared/types.ts` carries a `maskedKey: string` field — there is no `plainKey` field anywhere in the shared type surface.

@@ -1,0 +1,192 @@
+---
+title: "Admin API: managing provider API keys"
+description: "Add, list, toggle, and delete provider API keys in FreeLLMAPI. Keys are AES-256-GCM encrypted at rest and returned masked. Supports 11 provider platforms."
+---
+
+These endpoints manage the provider credentials stored in FreeLLMAPI. Each key is encrypted at rest and returned masked on read. Keys are associated with a specific platform and can be individually enabled or disabled without deleting them. The health status of each key is updated periodically by the background health checker.
+
+## Endpoints
+
+### List all keys
+
+Returns all stored keys with their fields masked. The raw key value is never returned.
+
+```http
+GET /api/keys
+```
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/api/keys
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="[]" type="ApiKey[]">
+  Array of key objects.
+  <Expandable title="ApiKey properties">
+    <ResponseField name="id" type="number">
+      Unique numeric identifier for the key.
+    </ResponseField>
+    <ResponseField name="platform" type="string">
+      Provider platform (e.g. `google`, `groq`).
+    </ResponseField>
+    <ResponseField name="label" type="string">
+      Optional human-readable label for the key.
+    </ResponseField>
+    <ResponseField name="maskedKey" type="string">
+      Key value with most characters replaced (e.g. `AIza****cQ`).
+    </ResponseField>
+    <ResponseField name="status" type="string">
+      Health status of the key. One of `healthy`, `rate_limited`, `invalid`, `error`, `unknown`.
+    </ResponseField>
+    <ResponseField name="enabled" type="boolean">
+      Whether the key is active and eligible to be used by the router.
+    </ResponseField>
+    <ResponseField name="createdAt" type="string">
+      ISO 8601 timestamp when the key was added.
+    </ResponseField>
+    <ResponseField name="lastCheckedAt" type="string | null">
+      ISO 8601 timestamp of the most recent health check, or `null` if never checked.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Add a key
+
+Stores a new provider key. The raw key is encrypted before being written to the database.
+
+```http
+POST /api/keys
+```
+
+**Request body**
+
+<ParamField body="platform" type="string" required>
+  The provider platform for this key. Must be one of: `google`, `groq`, `cerebras`, `sambanova`, `nvidia`, `mistral`, `openrouter`, `github`, `huggingface`, `cohere`, `cloudflare`.
+</ParamField>
+
+<ParamField body="key" type="string" required>
+  The raw API key string. Must be at least 1 character.
+</ParamField>
+
+<ParamField body="label" type="string">
+  Optional label to identify this key (e.g. `"personal"`, `"production"`).
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST http://localhost:3001/api/keys \
+  -H "Content-Type: application/json" \
+  -d '{"platform": "groq", "key": "gsk_abc123", "label": "primary"}'
+```
+
+</CodeGroup>
+
+**Response** — `201 Created`
+
+<ResponseField name="id" type="number">
+  Assigned numeric ID for the new key.
+</ResponseField>
+<ResponseField name="platform" type="string">
+  Platform the key was registered for.
+</ResponseField>
+<ResponseField name="label" type="string">
+  Label provided, or empty string if omitted.
+</ResponseField>
+<ResponseField name="maskedKey" type="string">
+  Masked representation of the key that was stored.
+</ResponseField>
+<ResponseField name="status" type="string">
+  Always `unknown` on creation; updated after the first health check.
+</ResponseField>
+<ResponseField name="enabled" type="boolean">
+  Always `true` on creation.
+</ResponseField>
+
+---
+
+### Delete a key
+
+Permanently removes a key by its numeric ID. Returns `404` if no key with that ID exists.
+
+```http
+DELETE /api/keys/:id
+```
+
+<CodeGroup>
+
+```bash curl
+curl -X DELETE http://localhost:3001/api/keys/7
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="success" type="boolean">
+  `true` when the key was deleted.
+</ResponseField>
+
+---
+
+### Toggle a key
+
+Enables or disables a key without deleting it. Disabled keys are excluded from routing.
+
+```http
+PATCH /api/keys/:id
+```
+
+**Request body**
+
+<ParamField body="enabled" type="boolean" required>
+  `true` to enable the key, `false` to disable it.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl – disable a key
+curl -X PATCH http://localhost:3001/api/keys/7 \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+```
+
+```bash curl – re-enable a key
+curl -X PATCH http://localhost:3001/api/keys/7 \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="success" type="boolean">
+  `true` when the update was applied.
+</ResponseField>
+<ResponseField name="enabled" type="boolean">
+  The new enabled state of the key.
+</ResponseField>
+
+---
+
+## Key status values
+
+| Status | Meaning |
+|---|---|
+| `healthy` | Key passed the most recent validation check. |
+| `rate_limited` | Key returned a 429 response during the last check. |
+| `invalid` | Key was rejected with a 401 or similar auth error. |
+| `error` | Check failed for another reason (network error, 5xx, etc.). |
+| `unknown` | Key has not been checked yet. |
+
+<Note>
+  `zhipu`, `moonshot`, and `minimax` appear in the shared `Platform` type but are **not** accepted by `POST /api/keys`. Only the 11 platforms listed above are valid when adding keys.
+</Note>

@@ -1,0 +1,106 @@
+---
+title: "Contributing to FreeLLMAPI"
+description: "Development environment setup, the test suite, PR requirements, and a list of good first issues for new contributors to FreeLLMAPI."
+---
+
+FreeLLMAPI welcomes contributions. The codebase is small and deliberately narrow in scope — a TypeScript Express server, a handful of provider adapters, a SQLite-backed rate-limit ledger, and a React dashboard. Getting a working development environment takes about two minutes, and the test suite gives you fast feedback as you work.
+
+## Development loop
+
+You need Node.js 20+ and npm. Clone the repo and install dependencies once:
+
+```bash
+git clone https://github.com/tashfeenahmed/freellmapi.git
+cd freellmapi
+npm install
+```
+
+Copy the example env file and generate an encryption key:
+
+```bash
+cp .env.example .env
+echo "ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")" >> .env
+```
+
+Start the development server:
+
+```bash
+npm run dev
+```
+
+This launches two processes in parallel:
+
+- **Express API server** on `:3001` with TypeScript watch compilation.
+- **Vite dev server** on `:5173` serving the React dashboard with Hot Module Replacement.
+
+Changes to server code trigger a TypeScript recompile; changes to the dashboard are reflected in the browser immediately. Open `http://localhost:5173` for the dashboard and point any OpenAI client at `http://localhost:3001/v1` for the API.
+
+Run the test suite:
+
+```bash
+npm test
+```
+
+This runs [Vitest](https://vitest.dev/) across all `*.test.ts` files. There are 75 tests covering providers, routes, the router, and rate limiting. Tests are fast — no real network calls are made; all HTTP is mocked with `vi.stubGlobal('fetch', ...)`.
+
+## Test structure
+
+```
+server/src/__tests__/
+├── providers/
+│   ├── cerebras.test.ts
+│   ├── cloudflare.test.ts
+│   ├── cohere.test.ts
+│   ├── google.test.ts
+│   ├── groq.test.ts
+│   └── openai-compat.test.ts
+├── routes/
+│   ├── fallback.test.ts
+│   ├── keys.test.ts
+│   └── proxy-tools.test.ts
+├── services/
+│   ├── ratelimit.test.ts
+│   └── router.test.ts
+├── integration/
+└── lib/
+```
+
+Provider tests mock `fetch` at the global level, exercise `chatCompletion()`, `streamChatCompletion()`, and `validateKey()`, and assert on the returned OpenAI-shaped objects. Route tests spin up a full Express app with an in-memory SQLite database and make HTTP requests with `supertest`. The router and rate-limit service tests verify selection logic and counter bookkeeping in isolation.
+
+## Good first PRs
+
+<CardGroup cols={2}>
+  <Card title="Add a provider" icon="plug">
+    Copy `server/src/providers/openai-compat.ts` as a template, wire it into
+    `server/src/providers/index.ts`, seed its models in `server/src/db/index.ts`,
+    and add a test in `server/src/__tests__/providers/`. See the
+    [Adding Providers](/guides/adding-providers) guide for a step-by-step walkthrough.
+  </Card>
+  <Card title="Add an endpoint" icon="code">
+    Embeddings (`/v1/embeddings`), image generation (`/v1/images/*`), and
+    moderations (`/v1/moderations`) are not yet implemented. The `BaseProvider`
+    abstract class can grow new methods; adapters declare which they support.
+  </Card>
+  <Card title="Improve the router" icon="shuffle">
+    The current router ranks models by `intelligence_rank`. Ideas: latency-weighted
+    priority (prefer Cerebras/Groq when speed matters), cost-aware routing,
+    regional pinning, or smarter cooldown recovery.
+  </Card>
+  <Card title="Dashboard polish" icon="chart-bar">
+    More granular charts on the Analytics page, key rotation UX, batch import
+    of keys from a `.env` file, or dark-mode refinements.
+  </Card>
+</CardGroup>
+
+Other welcome contributions noted in the README: Go/Rust/other language client examples, a Docker or Fly.io deployment recipe, and fixes for stale rate-limit numbers as providers update their free tiers.
+
+## PR requirements
+
+Before opening a pull request, make sure:
+
+- **Include a test.** New provider adapters need a test in `server/src/__tests__/providers/`. New routes or route behaviour need a test in `server/src/__tests__/routes/`. Bug fixes should include a regression test.
+- **Keep the suite green.** Run `npm test` and confirm all 75 (plus your new) tests pass.
+- **Match code style.** The repo uses `.editorconfig` (2-space indent, LF line endings, trailing newline) and a shared `tsconfig`. TypeScript `strict` mode is on; avoid `any` unless you have a good reason.
+- **Update seed data for new providers.** If your PR adds a provider, include the model rows in `server/src/db/index.ts` with accurate rate-limit numbers sourced from the provider's documentation.
+
+Issues and discussions are open on GitHub. If you're unsure whether a change is in scope, open an issue first to check before writing code.

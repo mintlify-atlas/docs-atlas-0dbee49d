@@ -1,0 +1,304 @@
+---
+title: "Admin API: analytics and request logs"
+description: "Monitor FreeLLMAPI traffic with six endpoints: request volume, success rates, token counts, latency, and error breakdowns — filtered by 24h, 7d, or 30d windows."
+---
+
+The analytics endpoints expose aggregated data about every request routed through FreeLLMAPI. Use these to monitor traffic volume, identify slow or unreliable providers, track token consumption over time, and diagnose recurring errors. All endpoints accept a `range` query parameter to narrow results to a rolling time window.
+
+## Common query parameters
+
+<ParamField query="range" type="string" default="7d">
+  Time window to include. Accepted values: `24h`, `7d`, `30d`. Defaults to `7d`.
+</ParamField>
+
+---
+
+## Endpoints
+
+### Summary stats
+
+Returns aggregate totals and rates across all requests in the selected time range.
+
+```http
+GET /api/analytics/summary?range=7d
+```
+
+<CodeGroup>
+
+```bash curl
+curl "http://localhost:3001/api/analytics/summary?range=7d"
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="totalRequests" type="number">
+  Total number of requests in the period.
+</ResponseField>
+<ResponseField name="successRate" type="number">
+  Percentage of requests that completed successfully, rounded to one decimal place.
+</ResponseField>
+<ResponseField name="totalInputTokens" type="number">
+  Sum of all prompt tokens across successful and failed requests.
+</ResponseField>
+<ResponseField name="totalOutputTokens" type="number">
+  Sum of all completion tokens.
+</ResponseField>
+<ResponseField name="avgLatencyMs" type="number">
+  Mean end-to-end latency in milliseconds, rounded to the nearest integer.
+</ResponseField>
+<ResponseField name="estimatedCostSavings" type="number">
+  Estimated USD value of tokens processed, benchmarked against GPT-4o pricing ($3 per million input tokens, $15 per million output tokens). This is the equivalent cost that would have been incurred using a paid model at those rates.
+</ResponseField>
+
+---
+
+### Stats by model
+
+Returns per-model aggregates for the selected time range, sorted by request volume descending.
+
+```http
+GET /api/analytics/by-model?range=7d
+```
+
+<CodeGroup>
+
+```bash curl
+curl "http://localhost:3001/api/analytics/by-model?range=30d"
+```
+
+</CodeGroup>
+
+**Response** — array of model stat objects
+
+<ResponseField name="[]" type="object[]">
+  <Expandable title="Model stat properties">
+    <ResponseField name="platform" type="string">
+      Provider platform (e.g. `groq`).
+    </ResponseField>
+    <ResponseField name="modelId" type="string">
+      Model identifier as sent to the provider.
+    </ResponseField>
+    <ResponseField name="displayName" type="string">
+      Human-readable model name, or `modelId` if no display name is registered.
+    </ResponseField>
+    <ResponseField name="requests" type="number">
+      Total request count for this model in the period.
+    </ResponseField>
+    <ResponseField name="successRate" type="number">
+      Percentage of successful requests, rounded to one decimal place.
+    </ResponseField>
+    <ResponseField name="avgLatencyMs" type="number">
+      Mean latency in milliseconds.
+    </ResponseField>
+    <ResponseField name="totalInputTokens" type="number">
+      Sum of prompt tokens for this model.
+    </ResponseField>
+    <ResponseField name="totalOutputTokens" type="number">
+      Sum of completion tokens for this model.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Stats by platform
+
+Returns the same aggregates as by-model, but rolled up to the provider level.
+
+```http
+GET /api/analytics/by-platform?range=7d
+```
+
+<CodeGroup>
+
+```bash curl
+curl "http://localhost:3001/api/analytics/by-platform?range=24h"
+```
+
+</CodeGroup>
+
+**Response** — array of platform stat objects
+
+<ResponseField name="[]" type="object[]">
+  <Expandable title="Platform stat properties">
+    <ResponseField name="platform" type="string">
+      Provider platform.
+    </ResponseField>
+    <ResponseField name="requests" type="number">
+      Total request count across all models on this platform.
+    </ResponseField>
+    <ResponseField name="successRate" type="number">
+      Percentage of successful requests.
+    </ResponseField>
+    <ResponseField name="avgLatencyMs" type="number">
+      Mean latency in milliseconds.
+    </ResponseField>
+    <ResponseField name="totalInputTokens" type="number">
+      Sum of prompt tokens for this platform.
+    </ResponseField>
+    <ResponseField name="totalOutputTokens" type="number">
+      Sum of completion tokens for this platform.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Timeline
+
+Returns request counts grouped into time buckets for charting. Use `interval=hour` for a 24-hour range and `interval=day` for longer ranges.
+
+```http
+GET /api/analytics/timeline?range=7d&interval=day
+```
+
+<ParamField query="interval" type="string" default="day">
+  Bucket size for grouping. Accepted values: `hour`, `day`. Defaults to `hour` when `range=24h`, otherwise `day`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl – daily buckets for the past week
+curl "http://localhost:3001/api/analytics/timeline?range=7d&interval=day"
+```
+
+```bash curl – hourly buckets for the past 24 hours
+curl "http://localhost:3001/api/analytics/timeline?range=24h&interval=hour"
+```
+
+</CodeGroup>
+
+**Response** — array of time series points, ordered by timestamp ascending
+
+<ResponseField name="[]" type="object[]">
+  <Expandable title="Timeline point properties">
+    <ResponseField name="timestamp" type="string">
+      Start of the bucket. Format is `YYYY-MM-DDTHH:00:00` for hourly or `YYYY-MM-DD` for daily.
+    </ResponseField>
+    <ResponseField name="requests" type="number">
+      Total requests in this bucket.
+    </ResponseField>
+    <ResponseField name="successCount" type="number">
+      Number of successful requests.
+    </ResponseField>
+    <ResponseField name="failureCount" type="number">
+      Number of failed requests.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Error distribution
+
+Returns a breakdown of failed requests by error category and platform. Errors are classified by pattern-matching on the error message.
+
+```http
+GET /api/analytics/error-distribution?range=7d
+```
+
+<CodeGroup>
+
+```bash curl
+curl "http://localhost:3001/api/analytics/error-distribution?range=7d"
+```
+
+</CodeGroup>
+
+**Response**
+
+<ResponseField name="byCategory" type="object[]">
+  Error counts grouped by category across all platforms.
+  <Expandable title="Category entry properties">
+    <ResponseField name="category" type="string">
+      Error category label (e.g. `Rate Limited (429)`, `Auth Error (401)`, `Timeout/Connection`, `Other`).
+    </ResponseField>
+    <ResponseField name="count" type="number">
+      Number of errors in this category.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="byPlatform" type="object[]">
+  Total error counts grouped by platform.
+  <Expandable title="Platform entry properties">
+    <ResponseField name="platform" type="string">
+      Provider platform.
+    </ResponseField>
+    <ResponseField name="count" type="number">
+      Total error count for this platform.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="detailed" type="object[]">
+  Error counts grouped by both platform and category.
+  <Expandable title="Detailed entry properties">
+    <ResponseField name="platform" type="string">
+      Provider platform.
+    </ResponseField>
+    <ResponseField name="model_id" type="string">
+      Model identifier.
+    </ResponseField>
+    <ResponseField name="error_category" type="string">
+      Classified error category.
+    </ResponseField>
+    <ResponseField name="count" type="number">
+      Number of errors matching this platform + category combination.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Recent errors
+
+Returns the 50 most recent failed requests in the selected time range.
+
+```http
+GET /api/analytics/errors?range=7d
+```
+
+<CodeGroup>
+
+```bash curl
+curl "http://localhost:3001/api/analytics/errors?range=24h"
+```
+
+</CodeGroup>
+
+**Response** — array of up to 50 error log entries, ordered by most recent first
+
+<ResponseField name="[]" type="object[]">
+  <Expandable title="Error log properties">
+    <ResponseField name="id" type="number">
+      Internal request ID.
+    </ResponseField>
+    <ResponseField name="platform" type="string">
+      Provider platform that returned the error.
+    </ResponseField>
+    <ResponseField name="modelId" type="string">
+      Model that was targeted.
+    </ResponseField>
+    <ResponseField name="error" type="string">
+      Raw error message from the provider or router.
+    </ResponseField>
+    <ResponseField name="latencyMs" type="number">
+      Time elapsed before the error was returned, in milliseconds.
+    </ResponseField>
+    <ResponseField name="createdAt" type="string">
+      ISO 8601 timestamp of the request.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Cost savings calculation
+
+`estimatedCostSavings` in the summary response is calculated using GPT-4o public pricing as a benchmark:
+
+- **$3.00** per million input tokens
+- **$15.00** per million output tokens
+
+This represents the equivalent cost that would have been incurred if the same token volume had been processed by GPT-4o, providing a rough measure of the value delivered by using free-tier providers through FreeLLMAPI.

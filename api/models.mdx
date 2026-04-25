@@ -1,0 +1,115 @@
+---
+title: "GET /v1/models"
+description: "GET /v1/models — lists enabled models ordered by intelligence rank. Compatible with the OpenAI SDK, Continue, and any OpenAI-compatible client or tool."
+---
+
+The `/v1/models` endpoint returns every model that FreeLLMAPI currently has enabled in its database, ordered by intelligence rank. The response follows the OpenAI model list format, so any client library or tool that calls `GET /v1/models` against the OpenAI API will work unchanged — just point it at your local server instead.
+
+## Endpoint
+
+```
+GET /v1/models
+```
+
+## Authentication
+
+No authentication is required. The endpoint is public on whichever port FreeLLMAPI is running.
+
+## Response
+
+The response is an OpenAI-compatible list object.
+
+<ResponseField name="object" type="string" required>
+  Always `"list"`.
+</ResponseField>
+
+<ResponseField name="data" type="object[]" required>
+  Array of model objects, ordered by intelligence rank (highest first).
+
+  <Expandable title="Model object fields">
+    <ResponseField name="id" type="string" required>
+      The model identifier used in API requests, e.g. `"gemini-2.5-flash"` or `"llama-3.3-70b-versatile"`. Pass this value as `model` in a chat completions request to target a specific model.
+    </ResponseField>
+    <ResponseField name="object" type="string" required>
+      Always `"model"`.
+    </ResponseField>
+    <ResponseField name="created" type="number" required>
+      Unix timestamp. Always `0` — FreeLLMAPI does not track model creation dates.
+    </ResponseField>
+    <ResponseField name="owned_by" type="string" required>
+      The platform name that hosts this model, e.g. `"google"`, `"groq"`, `"cerebras"`, `"sambanova"`, `"nvidia"`, `"mistral"`, `"openrouter"`, `"github"`, `"huggingface"`, `"cohere"`, `"cloudflare"`, `"zhipu"`, `"moonshot"`, or `"minimax"`. Use this field to filter models by provider.
+    </ResponseField>
+    <ResponseField name="name" type="string" required>
+      Human-readable display name for the model, e.g. `"Gemini 2.5 Flash"`.
+    </ResponseField>
+    <ResponseField name="context_window" type="number | null" required>
+      Maximum context length in tokens. `null` if not recorded for this model.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Examples
+
+<CodeGroup>
+
+```bash curl
+curl http://localhost:3001/v1/models
+```
+
+```python Python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:3001/v1",
+    api_key="freellmapi-your-unified-key",
+)
+
+models = client.models.list()
+
+for model in models:
+    print(f"{model.id:50s}  owned_by={model.owned_by}")
+```
+
+</CodeGroup>
+
+### Example response
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "gemini-2.5-pro",
+      "object": "model",
+      "created": 0,
+      "owned_by": "google",
+      "name": "Gemini 2.5 Pro",
+      "context_window": 1048576
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "object": "model",
+      "created": 0,
+      "owned_by": "google",
+      "name": "Gemini 2.5 Flash",
+      "context_window": 1048576
+    },
+    {
+      "id": "llama-3.3-70b-versatile",
+      "object": "model",
+      "created": 0,
+      "owned_by": "groq",
+      "name": "Llama 3.3 70B Versatile",
+      "context_window": 128000
+    }
+  ]
+}
+```
+
+<Note>
+  Only models with `enabled = true` in the database appear in this list. If you added a key for a provider but its models are not showing, check the **Keys** page in the admin dashboard to confirm the key is healthy.
+</Note>
+
+<Note>
+  The `owned_by` field maps directly to the platform names used internally by the router. You can use it to identify which provider will serve a given model ID when you call `/v1/chat/completions`.
+</Note>

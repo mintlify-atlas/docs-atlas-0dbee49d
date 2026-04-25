@@ -1,0 +1,205 @@
+---
+title: "Add a new AI provider to FreeLLMAPI"
+description: "Step-by-step guide to implementing a new provider adapter, registering it in the provider registry, seeding its models, and wiring up a test."
+---
+
+FreeLLMAPI routes requests through a registry of provider adapters, each implementing the `BaseProvider` abstract class. Adding a new provider means writing that adapter, registering it, seeding its model records into SQLite, and covering it with a test. For the vast majority of providers the work is minimal — if the provider exposes an OpenAI-compatible `/v1/chat/completions` endpoint (which most modern inference APIs do), you don't need to write any HTTP logic at all.
+
+## Two provider types
+
+**`OpenAICompatProvider` (most new providers)** covers any platform whose API speaks the OpenAI wire format: Groq, Cerebras, SambaNova, NVIDIA NIM, Mistral, OpenRouter, GitHub Models, Zhipu, Moonshot, MiniMax, and more. You only need to supply a `platform` identifier, a human-readable `name`, and a `baseUrl`. The class in `server/src/providers/openai-compat.ts` handles `chatCompletion()`, `streamChatCompletion()`, and `validateKey()` for you.
+
+**Custom adapters** are needed when a provider's API differs significantly from the OpenAI format. Google Gemini uses a completely different request/response shape (Gemini's `generateContent` / SSE `streamGenerateContent`, `functionDeclarations`, `functionResponse`). Cohere, Cloudflare Workers AI, and Hugging Face Inference Providers also have custom adapters in `server/src/providers/` for the same reason.
+
+<Note>
+  `openai-compat.ts` is the template for most new providers. If the provider's
+  docs show a `/v1/chat/completions` endpoint, start there — you'll have a
+  working adapter in under five minutes.
+</Note>
+
+## Adding an OpenAI-compatible provider
+
+<Steps>
+  <Step title="Copy the openai-compat pattern">
+    You don't need a separate file for OpenAI-compatible providers. The
+    `OpenAICompatProvider` class is generic and is instantiated directly in the
+    registry. Inspect `server/src/providers/openai-compat.ts` to understand the
+    constructor options:
+
+    ```typescript server/src/providers/openai-compat.ts
+    constructor(opts: {
+      platform: Platform;       // matches the Platform union in shared/types.ts
+      name: string;             // human-readable name shown in logs and the dashboard
+      baseUrl: string;          // the provider's OpenAI-compatible base URL (no trailing slash)
+      extraHeaders?: Record<string, string>;  // optional static headers (e.g. HTTP-Referer)
+      validateUrl?: string;     // override the URL used for key validation (default: baseUrl/models)
+    })
+    ```
+
+    If your provider needs extra request headers (OpenRouter requires `HTTP-Referer`
+    and `X-Title`, for example), pass them in `extraHeaders`. If key validation
+    doesn't work against `/models`, supply a `validateUrl`.
+
+    If the provider's API is substantially different from the OpenAI format, create
+    a new file `server/src/providers/<name>.ts` and extend `BaseProvider` directly
+    — see `google.ts` as a reference implementation.
+  </Step>
+
+  <Step title="Register in providers/index.ts">
+    Open `server/src/providers/index.ts` and add a `register()` call. Here is
+    how Groq is registered, as a concrete example to follow:
+
+    ```typescript server/src/providers/index.ts
+    // Groq - OpenAI-compatible
+    register(new OpenAICompatProvider({
+      platform: 'groq',
+      name: 'Groq',
+      baseUrl: 'https://api.groq.com/openai/v1',
+    }));
+    ```
+
+    OpenRouter additionally passes `extraHeaders` because the platform requires
+    attribution headers:
+
+    ```typescript server/src/providers/index.ts
+    // OpenRouter - OpenAI-compatible with extra headers
+    register(new OpenAICompatProvider({
+      platform: 'openrouter',
+      name: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      extraHeaders: {
+        'HTTP-Referer': 'http://localhost:3001',
+        'X-Title': 'FreeLLMAPI',
+      },
+    }));
+    ```
+
+    You also need to add your new platform name to the `Platform` union in
+    `shared/types.ts` so TypeScript accepts it everywhere:
+
+    ```typescript shared/types.ts
+    export type Platform =
+      | 'google'
+      | 'groq'
+      // ... existing entries ...
+      | 'myprovider';   // add your platform here
+    ```
+  </Step>
+
+  <Step title="Seed model records in db/index.ts">
+    New models are inserted by the `seedModels()` function in
+    `server/src/db/index.ts`. Add your model(s) to the `models` array:
+
+    ```typescript server/src/db/index.ts
+    // MyProvider - OpenAI-compatible
+    ['myprovider', 'my-model-id', 'My Model Display Name',
+      /* intelligenceRank */ 10,
+      /* speedRank       */ 5,
+      /* sizeLabel       */ 'Large',
+      /* rpmLimit        */ 60,
+      /* rpdLimit        */ 1000,
+      /* tpmLimit        */ 100000,
+      /* tpdLimit        */ null,
+      /* monthlyBudget   */ '~30M',
+      /* contextWindow   */ 131072
+    ],
+    ```
+
+    Field reference:
+
+    | Field | Type | Description |
+    |---|---|---|
+    | `intelligenceRank` | `number` | Lower = smarter. Used to order the fallback chain. |
+    | `speedRank` | `number` | Lower = faster. Informational; shown in the dashboard. |
+    | `sizeLabel` | `string` | `'Small'`, `'Medium'`, `'Large'`, or `'Frontier'`. |
+    | `rpmLimit` | `number \| null` | Requests per minute cap. `null` if undocumented. |
+    | `rpdLimit` | `number \| null` | Requests per day cap. |
+    | `tpmLimit` | `number \| null` | Tokens per minute cap. |
+    | `tpdLimit` | `number \| null` | Tokens per day cap. |
+    | `monthlyTokenBudget` | `string` | Human-readable estimate, e.g. `'~30M'`. |
+    | `contextWindow` | `number \| null` | Max context in tokens. |
+
+    After adding a row, the model automatically appears in the fallback chain on
+    next startup because `seedModels()` populates `fallback_config` from whatever
+    is in `models`.
+
+    If you are updating an existing database (development), add an idempotent
+    `migrateModels*` function following the pattern already in `db/index.ts`, and
+    call it from `initDb()`.
+  </Step>
+
+  <Step title="Add a test in server/src/__tests__/providers/">
+    Copy the structure of an existing provider test such as
+    `server/src/__tests__/providers/groq.test.ts`. Your test should mock the
+    provider's HTTP endpoint with `vi.stubGlobal('fetch', ...)` (or `msw`), then
+    assert that `chatCompletion()`, `streamChatCompletion()`, and `validateKey()`
+    return the expected shapes.
+
+    ```typescript server/src/__tests__/providers/myprovider.test.ts
+    import { describe, it, expect, vi, beforeEach } from 'vitest';
+    import { OpenAICompatProvider } from '../../providers/openai-compat.js';
+
+    const provider = new OpenAICompatProvider({
+      platform: 'myprovider',
+      name: 'MyProvider',
+      baseUrl: 'https://api.myprovider.com/v1',
+    });
+
+    describe('MyProvider', () => {
+      beforeEach(() => vi.restoreAllMocks());
+
+      it('chatCompletion returns a valid response', async () => {
+        vi.stubGlobal('fetch', async () => new Response(
+          JSON.stringify({
+            id: 'chatcmpl-test',
+            object: 'chat.completion',
+            created: 0,
+            model: 'my-model-id',
+            choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ));
+
+        const result = await provider.chatCompletion(
+          'test-key',
+          [{ role: 'user', content: 'hello' }],
+          'my-model-id',
+        );
+        expect(result.choices[0].message.content).toBe('hi');
+      });
+    });
+    ```
+
+    Run `npm test` to confirm the suite stays green.
+  </Step>
+</Steps>
+
+## BaseProvider abstract class reference
+
+Every provider adapter extends `BaseProvider` from `server/src/providers/base.ts`. The three abstract methods you must implement are:
+
+```typescript server/src/providers/base.ts
+abstract chatCompletion(
+  apiKey: string,
+  messages: ChatMessage[],
+  modelId: string,
+  options?: CompletionOptions,
+): Promise<ChatCompletionResponse>;
+
+abstract streamChatCompletion(
+  apiKey: string,
+  messages: ChatMessage[],
+  modelId: string,
+  options?: CompletionOptions,
+): AsyncGenerator<ChatCompletionChunk>;
+
+abstract validateKey(apiKey: string): Promise<boolean>;
+```
+
+`BaseProvider` also exposes two protected helpers:
+
+- **`fetchWithTimeout(url, init, timeoutMs?)`** — wraps `fetch` with a 15-second `AbortController` timeout by default. Use this for all outbound HTTP calls so stuck providers don't block the retry loop forever.
+- **`makeId()`** — generates a `chatcmpl-<timestamp>-<random>` ID string for synthetic response objects (useful in custom adapters that need to produce an OpenAI-shaped response from a non-OpenAI API).
+
+`CompletionOptions` carries the standard generation parameters forwarded from the client: `model`, `temperature`, `max_tokens`, `top_p`, `tools`, `tool_choice`, and `parallel_tool_calls`.

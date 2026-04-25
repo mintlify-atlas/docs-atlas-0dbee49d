@@ -1,0 +1,109 @@
+{
+  "projectType": "api-service",
+  "projectName": "FreeLLMAPI",
+  "projectDescription": "An OpenAI-compatible proxy that aggregates free-tier API keys from 14 AI providers with automatic failover, rate-limit tracking, and encrypted key storage — giving you a single unified endpoint backed by ~1.3B tokens/month of free inference capacity.",
+  "theme": "luma",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/router",
+              "concepts/rate-limiting",
+              "concepts/fallback-chain",
+              "concepts/key-storage"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/adding-providers",
+              "guides/client-libraries",
+              "guides/tool-calling",
+              "guides/deployment",
+              "guides/contributing"
+            ]
+          },
+          {
+            "group": "Providers",
+            "pages": [
+              "providers/overview",
+              "providers/tos-review"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "OpenAI-Compatible Endpoints",
+            "pages": [
+              "api/chat-completions",
+              "api/models"
+            ]
+          },
+          {
+            "group": "Admin API",
+            "pages": [
+              "api/admin/keys",
+              "api/admin/fallback",
+              "api/admin/analytics",
+              "api/admin/health",
+              "api/admin/settings"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Single OpenAI-compatible /v1/chat/completions endpoint aggregating 14 free-tier AI providers",
+    "Automatic failover: on 429/5xx, the router cools down the key and retries the next model in the fallback chain",
+    "Per-key rate tracking (RPM, RPD, TPM, TPD) with sliding-window counters so the router never exceeds free-tier caps",
+    "Sticky sessions for multi-turn conversations to prevent hallucination from mid-conversation model switches",
+    "AES-256-GCM encrypted key storage in SQLite — provider keys never leave the server in plaintext",
+    "Unified bearer token for client authentication; provider keys are never exposed to callers",
+    "Streaming (SSE) and non-streaming responses, plus full OpenAI-style tool calling across all providers",
+    "Admin dashboard (React + Vite) for managing keys, reordering fallback chain, inspecting analytics, and running playground prompts",
+    "Lightweight: ~40 MB RSS at idle; runs on a Raspberry Pi 4 under PM2"
+  ],
+  "publicApiSurface": [
+    "POST /v1/chat/completions",
+    "GET /v1/models",
+    "GET /api/keys",
+    "POST /api/keys",
+    "DELETE /api/keys/:id",
+    "PATCH /api/keys/:id",
+    "GET /api/fallback",
+    "PUT /api/fallback",
+    "POST /api/fallback/sort/:preset",
+    "GET /api/fallback/token-usage",
+    "GET /api/analytics/summary",
+    "GET /api/analytics/by-model",
+    "GET /api/analytics/by-platform",
+    "GET /api/analytics/timeline",
+    "GET /api/analytics/error-distribution",
+    "GET /api/analytics/errors",
+    "GET /api/health",
+    "POST /api/health/check/:keyId",
+    "POST /api/health/check-all",
+    "GET /api/settings/api-key",
+    "POST /api/settings/api-key/regenerate",
+    "GET /api/ping"
+  ]
+}

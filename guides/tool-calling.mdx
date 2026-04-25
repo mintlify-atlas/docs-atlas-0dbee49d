@@ -1,0 +1,154 @@
+---
+title: "Tool calling across providers with FreeLLMAPI"
+description: "Use OpenAI-style function tools transparently across all 14 providers — the proxy handles format translation to Google Gemini automatically."
+---
+
+FreeLLMAPI passes OpenAI-style `tools` and `tool_choice` parameters to every provider it supports, and normalises the response back into the OpenAI `tool_calls` shape. From your application's perspective the API is identical regardless of which provider the router picks. Multi-step agentic flows — define tools, receive a `tool_calls` response, execute the tool, send the result back, receive the final answer — round-trip correctly across all providers in the fallback chain.
+
+## How translation works
+
+Most providers in the catalog (Groq, Cerebras, SambaNova, Mistral, OpenRouter, GitHub Models, Cloudflare, Cohere-compat, Zhipu, Moonshot, MiniMax) expose an OpenAI-compatible `/v1/chat/completions` endpoint and accept the `tools` array as-is. The proxy forwards the request unchanged.
+
+**Google Gemini** uses a different schema. The proxy's `GoogleProvider` adapter (`server/src/providers/google.ts`) translates transparently in both directions:
+
+- `tools[].function` → `functionDeclarations[]` inside a `tools` wrapper
+- `tool_choice` string values → `toolConfig.functionCallingConfig.mode` (`"none"` → `NONE`, `"auto"` → `AUTO`, `"required"` → `ANY`)
+- A specific function `tool_choice` → `mode: ANY` with `allowedFunctionNames`
+- Gemini `functionCall` parts in the response → OpenAI `tool_calls` on the assistant message
+- `tool` role follow-up messages → Gemini `functionResponse` parts
+
+<Note>
+  You never need to handle the Gemini translation yourself. Write standard
+  OpenAI tool-calling code and the proxy adapts it automatically, regardless of
+  which provider the router selects.
+</Note>
+
+## Basic two-turn tool call
+
+The pattern is: define your tools, make the first call (the model responds with `tool_calls`), execute the tool in your code, then make a second call with the tool result appended to the conversation.
+
+<CodeGroup>
+
+```python Python
+from openai import OpenAI
+import json
+
+client = OpenAI(
+    base_url="http://localhost:3001/v1",
+    api_key="freellmapi-your-unified-key",
+)
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get current weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "City name"},
+            },
+            "required": ["city"],
+        },
+    },
+}]
+
+# Turn 1: model asks for a tool call
+first = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "What's the weather in Karachi?"}],
+    tools=tools,
+    tool_choice="required",
+)
+call = first.choices[0].message.tool_calls[0]
+args = json.loads(call.function.arguments)
+print(f"Model wants to call: {call.function.name}({args})")
+
+# Execute the tool (your code)
+tool_result = json.dumps({"temp_c": 32, "condition": "sunny"})
+
+# Turn 2: feed the result back and get the final answer
+final = client.chat.completions.create(
+    model="auto",
+    messages=[
+        {"role": "user", "content": "What's the weather in Karachi?"},
+        first.choices[0].message,   # the assistant message with tool_calls
+        {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": tool_result,
+        },
+    ],
+    tools=tools,
+)
+print(final.choices[0].message.content)
+```
+
+</CodeGroup>
+
+## Streaming tool calls
+
+Add `stream=True` to receive `delta.tool_calls` chunks. The stream ends with a chunk whose `finish_reason` is `"tool_calls"`.
+
+<CodeGroup>
+
+```python Python (streaming)
+stream = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "What's the weather in Karachi?"}],
+    tools=tools,
+    tool_choice="auto",
+    stream=True,
+)
+
+accumulated_args = ""
+tool_name = ""
+tool_call_id = ""
+
+for chunk in stream:
+    delta = chunk.choices[0].delta
+    finish = chunk.choices[0].finish_reason
+
+    if delta.tool_calls:
+        tc = delta.tool_calls[0]
+        if tc.id:
+            tool_call_id = tc.id
+        if tc.function.name:
+            tool_name = tc.function.name
+        if tc.function.arguments:
+            accumulated_args += tc.function.arguments
+
+    if finish == "tool_calls":
+        print(f"Tool call complete: {tool_name}({accumulated_args})")
+```
+
+</CodeGroup>
+
+## Supported tool_choice values
+
+The `tool_choice` field accepts the same values as the OpenAI API:
+
+| Value | Behaviour |
+|---|---|
+| `"auto"` (default) | Model decides whether to call a tool or reply directly. |
+| `"none"` | Model must reply in plain text; tool calls are suppressed. |
+| `"required"` | Model must call at least one tool before replying. |
+| `{"type": "function", "function": {"name": "..."}}` | Model must call the named function specifically. |
+
+## Parallel tool calls
+
+Set `parallel_tool_calls=True` to allow the model to return multiple tool calls in a single response. Not all providers support this; those that don't will silently return a single call.
+
+```python
+resp = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "What's the weather in Karachi and London?"}],
+    tools=tools,
+    tool_choice="required",
+    parallel_tool_calls=True,
+)
+
+for call in resp.choices[0].message.tool_calls:
+    args = json.loads(call.function.arguments)
+    print(f"{call.function.name}({args})")
+```
